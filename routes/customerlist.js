@@ -7,6 +7,7 @@ const path = require('path')
 const storage = multer.memoryStorage()
 const upload = multer({ storage })
 
+
 router.get('/', async (req, res) => {
   try {
     const { data: customers, error } = await supabase
@@ -165,4 +166,4 @@ router.delete('/:id', async (req, res) => {
   }
 })
 
-module.exports = router
+export default router;

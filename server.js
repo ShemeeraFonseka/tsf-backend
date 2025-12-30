@@ -14,6 +14,22 @@ const app = express()
 app.use(cors())
 app.use(express.json())
 
+// Root route
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'Tropical Shellfish API',
+    status: 'Running',
+    endpoints: {
+      productlist: '/api/productlist',
+      customerlist: '/api/customerlist',
+      customerProducts: '/api/customer-products',
+      exportproductlist: '/api/exportproductlist',
+      exportcustomerlist: '/api/exportcustomerlist',
+      exportcustomerProducts: '/api/exportcustomer-products'
+    }
+  })
+})
+
 // Import routes
 import productlistRouter from './routes/productlist.js'
 app.use('/api/productlist', productlistRouter)

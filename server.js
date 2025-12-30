@@ -7,6 +7,14 @@ const app = express()
 app.use(cors())
 app.use(express.json())
 
+// ✅ ROOT HEALTH CHECK (VERY IMPORTANT)
+app.get('/', (req, res) => {
+  res.status(200).json({
+    status: 'OK',
+    message: 'API is running'
+  })
+})
+
 
 const productlistRouter = require('./routes/productlist')
 app.use('/api/productlist', productlistRouter)

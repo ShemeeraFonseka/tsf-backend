@@ -1,6 +1,7 @@
-const express = require('express')
+import express from 'express'
+import supabase from '../db.js'
+
 const router = express.Router()
-const supabase = require('../db')
 
 // Get price list for a customer
 router.get('/:cus_id', async (req, res) => {
@@ -89,4 +90,4 @@ router.delete('/:id', async (req, res) => {
   }
 })
 
-export default router;
+export default router

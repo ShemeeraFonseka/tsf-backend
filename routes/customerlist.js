@@ -1,12 +1,12 @@
-const express = require('express')
+import express from 'express'
+import supabase from '../db.js'
+import multer from 'multer'
+import { extname } from 'path'
+
 const router = express.Router()
-const supabase = require('../db')
-const multer = require('multer')
-const path = require('path')
 
 const storage = multer.memoryStorage()
 const upload = multer({ storage })
-
 
 router.get('/', async (req, res) => {
   try {
@@ -57,7 +57,7 @@ router.post('/upload', upload.single('image'), async (req, res) => {
   try {
     // Upload image to Supabase Storage if provided
     if (req.file) {
-      const fileName = `${Date.now()}${path.extname(req.file.originalname)}`
+      const fileName = `${Date.now()}${extname(req.file.originalname)}`
       const { data: uploadData, error: uploadError } = await supabase.storage
         .from('customer-images')
         .upload(fileName, req.file.buffer, {
@@ -101,13 +101,13 @@ router.post('/upload', upload.single('image'), async (req, res) => {
 
 // PUT - Update customer
 router.put('/upload/:id', upload.single('image'), async (req, res) => {
-  const { cus_name, company_name, phone,address, country, airport, email, existing_image_url } = req.body
+  const { cus_name, company_name, phone, address, country, airport, email, existing_image_url } = req.body
   let image_url = existing_image_url
 
   try {
     // Upload new image if provided
     if (req.file) {
-      const fileName = `${Date.now()}${path.extname(req.file.originalname)}`
+      const fileName = `${Date.now()}${extname(req.file.originalname)}`
       const { data: uploadData, error: uploadError } = await supabase.storage
         .from('customer-images')
         .upload(fileName, req.file.buffer, {
@@ -166,4 +166,4 @@ router.delete('/:id', async (req, res) => {
   }
 })
 
-export default router;
+export default router

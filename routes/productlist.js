@@ -1,8 +1,9 @@
-const express = require('express')
+import express from 'express'
+import supabase from '../db.js'
+import multer from 'multer'
+import path from 'path'
+
 const router = express.Router()
-const supabase = require('../db')
-const multer = require('multer')
-const path = require('path')
 
 // Configure multer for memory storage (we'll upload to Supabase Storage)
 const storage = multer.memoryStorage()
@@ -299,4 +300,4 @@ router.delete('/:productId/variants/:variantId', async (req, res) => {
   }
 })
 
-export default router;
+export default router

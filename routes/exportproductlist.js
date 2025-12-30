@@ -1,8 +1,9 @@
-const express = require('express')
+import express from 'express'
+import supabase from '../db.js'
+import multer from 'multer'
+import { extname } from 'path'
+
 const router = express.Router()
-const supabase = require('../db')
-const multer = require('multer')
-const path = require('path')
 
 // Configure multer for memory storage (we'll upload to Supabase Storage)
 const storage = multer.memoryStorage()
@@ -55,7 +56,7 @@ router.post('/upload', upload.single('image'), async (req, res) => {
 
   try {
     if (req.file) {
-      const fileName = `${Date.now()}${path.extname(req.file.originalname)}`
+      const fileName = `${Date.now()}${extname(req.file.originalname)}`
       const { error: uploadError } = await supabase.storage
         .from('product-images')
         .upload(fileName, req.file.buffer, {
@@ -102,7 +103,7 @@ router.put('/upload/:id', upload.single('image'), async (req, res) => {
 
   try {
     if (req.file) {
-      const fileName = `${Date.now()}${path.extname(req.file.originalname)}`
+      const fileName = `${Date.now()}${extname(req.file.originalname)}`
       await supabase.storage
         .from('product-images')
         .upload(fileName, req.file.buffer, {
@@ -299,4 +300,4 @@ router.delete('/:productId/variants/:variantId', async (req, res) => {
   }
 })
 
-export default router;
+export default router

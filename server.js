@@ -25,7 +25,8 @@ app.get('/', (req, res) => {
       customerProducts: '/api/customer-products',
       exportproductlist: '/api/exportproductlist',
       exportcustomerlist: '/api/exportcustomerlist',
-      exportcustomerProducts: '/api/exportcustomer-products'
+      exportcustomerProducts: '/api/exportcustomer-products',
+      usdrate: '/api/usd-rate'
     }
   })
 })
@@ -48,6 +49,12 @@ app.use('/api/exportcustomerlist', exportcustomerlistRouter)
 
 import exportcustomerProductsRouter from './routes/exportcustomerProducts.js'
 app.use('/api/exportcustomer-products', exportcustomerProductsRouter)
+
+import usdrateRouter from './routes/usdrate.js'
+app.use('/api/usd-rate', usdrateRouter)
+
+import feightrateRouter from './routes/Freightratesroutes.js'
+app.use('/api/freight-rates', feightrateRouter)
 
 // Serve uploaded images
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')))

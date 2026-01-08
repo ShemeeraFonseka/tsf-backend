@@ -77,10 +77,10 @@ router.post('/upload', upload.single('image'), async (req, res) => {
 
     const { data, error } = await supabase
       .from('exportproducts')
-      .insert({ 
-        common_name, 
-        scientific_name, 
-        category, 
+      .insert({
+        common_name,
+        scientific_name,
+        category,
         image_url,
         variants: variantsData
       })
@@ -122,10 +122,10 @@ router.put('/upload/:id', upload.single('image'), async (req, res) => {
 
     const { error } = await supabase
       .from('exportproducts')
-      .update({ 
-        common_name, 
-        scientific_name, 
-        category, 
+      .update({
+        common_name,
+        scientific_name,
+        category,
         image_url,
         variants: variantsData
       })
@@ -185,7 +185,7 @@ router.get('/:productId/variants', async (req, res) => {
 
 // POST - Add new variant to a product
 router.post('/:productId/variants', async (req, res) => {
-  const { size, unit, purchasing_price } = req.body
+  const { size, unit, purchasing_price, usdrate, labour_overhead, packing_cost, profit, profit_margin, exfactoryprice } = req.body
   const { productId } = req.params
 
   try {
@@ -204,7 +204,13 @@ router.post('/:productId/variants', async (req, res) => {
       id: Date.now(), // Simple unique ID
       size,
       unit,
-      purchasing_price: parseFloat(purchasing_price)
+      purchasing_price: parseFloat(purchasing_price),
+      usdrate: parseFloat(usdrate),
+      labour_overhead: parseFloat(labour_overhead),
+      packing_cost: parseFloat(packing_cost),
+      profit: parseFloat(profit),
+      profit_margin: parseFloat(profit_margin),
+      exfactoryprice: parseFloat(exfactoryprice)
     }
     const updatedVariants = [...currentVariants, newVariant]
 
@@ -225,7 +231,7 @@ router.post('/:productId/variants', async (req, res) => {
 
 // PUT - Update a specific variant
 router.put('/:productId/variants/:variantId', async (req, res) => {
-  const { size, unit, purchasing_price } = req.body
+  const { size, unit, purchasing_price, usdrate, labour_overhead, packing_cost, profit, profit_margin, exfactoryprice } = req.body
   const { productId, variantId } = req.params
 
   try {
@@ -240,14 +246,20 @@ router.put('/:productId/variants/:variantId', async (req, res) => {
 
     // Update the specific variant
     const currentVariants = product.variants || []
-    const updatedVariants = currentVariants.map(v => 
-      v.id == variantId 
-        ? { 
-            ...v, 
-            size, 
-            unit, 
-            purchasing_price: parseFloat(purchasing_price) 
-          }
+    const updatedVariants = currentVariants.map(v =>
+      v.id == variantId
+        ? {
+          ...v,
+          size,
+          unit,
+          purchasing_price: parseFloat(purchasing_price),
+          usdrate: parseFloat(usdrate),
+          labour_overhead: parseFloat(labour_overhead),
+          packing_cost: parseFloat(packing_cost),
+          profit: parseFloat(profit),
+          profit_margin: parseFloat(profit_margin),
+          exfactoryprice: parseFloat(exfactoryprice)
+        }
         : v
     )
 

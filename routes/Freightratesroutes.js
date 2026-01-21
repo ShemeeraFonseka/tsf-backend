@@ -70,20 +70,29 @@ router.get('/country/:country/latest', async (req, res) => {
   }
 })
 
-// POST - Create new freight rate
+// POST - Create new freight rate with weight tiers
 router.post('/', async (req, res) => {
   try {
-    const { country, rate, date } = req.body
+    const { country, rate_45kg, rate_100kg, rate_300kg, rate_500kg, date } = req.body
 
-    if (!country || !rate || rate <= 0) {
-      return res.status(400).json({ message: 'Country and valid rate are required' })
+    if (!country || !rate_45kg || !rate_100kg || !rate_300kg || !rate_500kg) {
+      return res.status(400).json({ message: 'Country and all weight tier rates are required' })
+    }
+
+    // Validate all rates are positive
+    if (parseFloat(rate_45kg) <= 0 || parseFloat(rate_100kg) <= 0 || 
+        parseFloat(rate_300kg) <= 0 || parseFloat(rate_500kg) <= 0) {
+      return res.status(400).json({ message: 'All rates must be greater than 0' })
     }
 
     const { data: newRate, error } = await supabase
       .from('freight_rates')
       .insert({
         country: country.trim(),
-        rate: parseFloat(rate),
+        rate_45kg: parseFloat(rate_45kg),
+        rate_100kg: parseFloat(rate_100kg),
+        rate_300kg: parseFloat(rate_300kg),
+        rate_500kg: parseFloat(rate_500kg),
         date: date || new Date().toISOString(),
         updated_at: new Date().toISOString()
       })
@@ -106,17 +115,26 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params
-    const { country, rate, date } = req.body
+    const { country, rate_45kg, rate_100kg, rate_300kg, rate_500kg, date } = req.body
 
-    if (!country || !rate || rate <= 0) {
-      return res.status(400).json({ message: 'Country and valid rate are required' })
+    if (!country || !rate_45kg || !rate_100kg || !rate_300kg || !rate_500kg) {
+      return res.status(400).json({ message: 'Country and all weight tier rates are required' })
+    }
+
+    // Validate all rates are positive
+    if (parseFloat(rate_45kg) <= 0 || parseFloat(rate_100kg) <= 0 || 
+        parseFloat(rate_300kg) <= 0 || parseFloat(rate_500kg) <= 0) {
+      return res.status(400).json({ message: 'All rates must be greater than 0' })
     }
 
     const { data: updatedRate, error } = await supabase
       .from('freight_rates')
       .update({
         country: country.trim(),
-        rate: parseFloat(rate),
+        rate_45kg: parseFloat(rate_45kg),
+        rate_100kg: parseFloat(rate_100kg),
+        rate_300kg: parseFloat(rate_300kg),
+        rate_500kg: parseFloat(rate_500kg),
         date: date || new Date().toISOString(),
         updated_at: new Date().toISOString()
       })

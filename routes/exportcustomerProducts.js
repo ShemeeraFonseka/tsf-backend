@@ -16,9 +16,20 @@ router.get('/:cus_id', async (req, res) => {
         category,
         size_range,
         purchasing_price,
+        exfactoryprice,
         margin,
         margin_percentage,
-        selling_price,
+        export_doc,
+        transport_cost,
+        loading_cost,
+        airway_cost,
+        forwardHandling_cost,
+        multiplier,
+        divisor,
+        freight_cost,
+        gross_weight_tier,
+        fob_price,
+        cnf,
         product_id
       `)
       .eq('cus_id', cus_id)

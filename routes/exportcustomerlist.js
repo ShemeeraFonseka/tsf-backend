@@ -12,9 +12,7 @@ router.get('/', async (req, res) => {
   try {
     const { data: customers, error } = await supabase
       .from('exportcustomers')
-      .select(`
-        *
-      `)
+      .select('*')
       .order('cus_id')
 
     if (error) throw error
@@ -30,9 +28,7 @@ router.get('/:id', async (req, res) => {
   try {
     const { data: customer, error } = await supabase
       .from('exportcustomers')
-      .select(`
-        *
-      `)
+      .select('*')
       .eq('cus_id', req.params.id)
       .single()
 
@@ -51,7 +47,16 @@ router.get('/:id', async (req, res) => {
 })
 
 router.post('/upload', upload.single('image'), async (req, res) => {
-  const { cus_name, company_name, phone, address, country, airport, email } = req.body
+  const { 
+    cus_name, 
+    company_name, 
+    phone, 
+    address, 
+    country, 
+    airport_code,
+    airport_name,
+    email 
+  } = req.body
   let image_url = null
 
   try {
@@ -83,7 +88,8 @@ router.post('/upload', upload.single('image'), async (req, res) => {
         phone,
         address, 
         country, 
-        airport, 
+        airport_code: airport_code ? airport_code.toUpperCase() : null,
+        airport_name: airport_name || null,
         email,
         image_url
       })
@@ -101,7 +107,17 @@ router.post('/upload', upload.single('image'), async (req, res) => {
 
 // PUT - Update customer
 router.put('/upload/:id', upload.single('image'), async (req, res) => {
-  const { cus_name, company_name, phone, address, country, airport, email, existing_image_url } = req.body
+  const { 
+    cus_name, 
+    company_name, 
+    phone, 
+    address, 
+    country, 
+    airport_code,
+    airport_name,
+    email, 
+    existing_image_url 
+  } = req.body
   let image_url = existing_image_url
 
   try {
@@ -132,7 +148,8 @@ router.put('/upload/:id', upload.single('image'), async (req, res) => {
         phone,
         address, 
         country, 
-        airport, 
+        airport_code: airport_code ? airport_code.toUpperCase() : null,
+        airport_name: airport_name || null,
         email,
         image_url
       })

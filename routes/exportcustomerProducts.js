@@ -17,8 +17,6 @@ router.get('/:cus_id', async (req, res) => {
         size_range,
         purchasing_price,
         exfactoryprice,
-        margin,
-        margin_percentage,
         export_doc,
         transport_cost,
         loading_cost,

@@ -56,6 +56,9 @@ app.use('/api/usd-rate', usdrateRouter)
 import feightrateRouter from './routes/Freightratesroutes.js'
 app.use('/api/freight-rates', feightrateRouter)
 
+import seafreightrateRouter from './routes/seafreightratesroute.js'
+app.use('/api/sea-freight-rates', seafreightrateRouter)
+
 // Serve uploaded images
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')))
 

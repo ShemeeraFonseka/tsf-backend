@@ -26,6 +26,8 @@ router.get('/:cus_id', async (req, res) => {
         divisor,
         freight_cost,
         gross_weight_tier,
+        container_type,
+        freight_type,
         fob_price,
         cnf,
         product_id

@@ -3,6 +3,187 @@ import supabase from '../db.js'
 
 const router = express.Router()
 
+// Helper function to get the applicable air freight rate by tier
+const getAirFreightRateByTier = (tier, rateData) => {
+  if (!rateData || !tier) return 0;
+  switch (tier) {
+    case 'gross+45kg':
+      return parseFloat(rateData.rate_45kg);
+    case 'gross+100kg':
+      return parseFloat(rateData.rate_100kg);
+    case 'gross+300kg':
+      return parseFloat(rateData.rate_300kg);
+    case 'gross+500kg':
+      return parseFloat(rateData.rate_500kg);
+    default:
+      return 0;
+  }
+}
+
+// Helper function to recalculate products affected by air freight rate change
+const recalculateAirFreightProducts = async (country, airportCode, newRateData) => {
+  try {
+    console.log(`\n=== Starting Air Freight Recalculation ===`)
+    console.log(`Country: ${country}`)
+    console.log(`Airport Code: ${airportCode}`)
+    console.log(`New Rates:`, newRateData)
+    
+    // Get current USD rate
+    const { data: usdRateData, error: usdError } = await supabase
+      .from('usd_rates')
+      .select('rate')
+      .order('updated_at', { ascending: false })
+      .limit(1)
+      .single()
+
+    if (usdError || !usdRateData) {
+      console.error('Could not fetch USD rate for recalculation:', usdError)
+      return { updated: 0, errors: 0, message: 'USD rate not found' }
+    }
+
+    const currentUsdRate = parseFloat(usdRateData.rate)
+    console.log(`Current USD Rate: ${currentUsdRate}`)
+
+    // Find customers with matching country and airport code (case-insensitive)
+    const { data: allCustomers, error: custError } = await supabase
+      .from('exportcustomers')
+      .select('cus_id, country, airport_code, cus_name')
+
+    if (custError) {
+      console.error('Error fetching customers:', custError)
+      return { updated: 0, errors: 0, message: 'Error fetching customers' }
+    }
+
+    console.log(`\nTotal customers in database: ${allCustomers?.length || 0}`)
+
+    // Filter customers with case-insensitive matching
+    const customers = allCustomers.filter(customer => 
+      customer.country && customer.airport_code &&
+      customer.country.toLowerCase().trim() === country.toLowerCase().trim() &&
+      customer.airport_code.toUpperCase().trim() === airportCode.toUpperCase().trim()
+    )
+
+    console.log(`Matching customers found: ${customers.length}`)
+    if (customers.length > 0) {
+      console.log('Matching customers:', customers.map(c => `${c.cus_name} (${c.country} - ${c.airport_code})`))
+    }
+
+    if (customers.length === 0) {
+      console.log(`No customers found for ${country} - ${airportCode}`)
+      return { updated: 0, errors: 0, message: 'No matching customers found' }
+    }
+
+    const customerIds = customers.map(c => c.cus_id)
+
+    // Get all products for these customers with air freight
+    const { data: products, error: fetchError } = await supabase
+      .from('exportcustomer_product')
+      .select('*')
+      .in('cus_id', customerIds)
+
+    if (fetchError) {
+      console.error('Error fetching products:', fetchError)
+      throw fetchError
+    }
+
+    console.log(`\nTotal products for these customers: ${products?.length || 0}`)
+
+    // Filter for air freight products
+    const airFreightProducts = products.filter(p => p.freight_type === 'air')
+    console.log(`Air freight products: ${airFreightProducts.length}`)
+
+    if (airFreightProducts.length === 0) {
+      console.log('No air freight products found for these customers')
+      return { updated: 0, errors: 0, message: 'No air freight products found' }
+    }
+
+    let updated = 0
+    let errors = 0
+
+    // Recalculate each product
+    for (const product of airFreightProducts) {
+      try {
+        const multiplier = parseFloat(product.multiplier) || 0
+        const divisor = parseFloat(product.divisor) || 1
+        const gross_weight_tier = product.gross_weight_tier
+
+        console.log(`\nProcessing product ID ${product.id}:`)
+        console.log(`  - Weight Tier: ${gross_weight_tier}`)
+        console.log(`  - Multiplier: ${multiplier}`)
+        console.log(`  - Divisor: ${divisor}`)
+
+        if (!gross_weight_tier || multiplier === 0) {
+          console.log(`  ⚠️ Skipping - missing weight tier or multiplier`)
+          continue
+        }
+
+        // Calculate new freight cost
+        const applicableRate = getAirFreightRateByTier(gross_weight_tier, newRateData)
+        const newFreightCost = (multiplier * applicableRate) / divisor
+
+        console.log(`  - Applicable Rate: $${applicableRate}/kg`)
+        console.log(`  - New Freight Cost: $${newFreightCost.toFixed(2)}`)
+
+        // Get cost values (stored in USD)
+        const export_doc = parseFloat(product.export_doc) || 0
+        const transport_cost = parseFloat(product.transport_cost) || 0
+        const loading_cost = parseFloat(product.loading_cost) || 0
+        const airway_cost = parseFloat(product.airway_cost) || 0
+        const forwardHandling_cost = parseFloat(product.forwardHandling_cost) || 0
+        const exfactoryprice = parseFloat(product.exfactoryprice) || 0
+
+        // Calculate total costs in USD
+        const totalCostsUSD = export_doc + transport_cost + loading_cost + airway_cost + forwardHandling_cost
+
+        // Convert total costs to LKR
+        const totalCostsLKR = totalCostsUSD * currentUsdRate
+
+        // Calculate new FOB in LKR
+        const newFobPrice = exfactoryprice + totalCostsLKR
+
+        // Calculate new CNF in USD (FOB in USD + Freight)
+        const fobInUSD = newFobPrice / currentUsdRate
+        const newCnf = fobInUSD + newFreightCost
+
+        console.log(`  - Old FOB: Rs.${product.fob_price}`)
+        console.log(`  - New FOB: Rs.${newFobPrice.toFixed(2)}`)
+        console.log(`  - New CNF: $${newCnf.toFixed(2)}`)
+
+        // Update the product
+        const { error: updateError } = await supabase
+          .from('exportcustomer_product')
+          .update({
+            freight_cost: parseFloat(newFreightCost.toFixed(2)),
+            fob_price: parseFloat(newFobPrice.toFixed(2)),
+            cnf: parseFloat(newCnf.toFixed(2))
+          })
+          .eq('id', product.id)
+
+        if (updateError) {
+          console.error(`  ❌ Error updating product ${product.id}:`, updateError)
+          errors++
+        } else {
+          console.log(`  ✅ Successfully updated`)
+          updated++
+        }
+      } catch (err) {
+        console.error(`  ❌ Error processing product ${product.id}:`, err)
+        errors++
+      }
+    }
+
+    console.log(`\n=== Recalculation Complete ===`)
+    console.log(`Updated: ${updated}`)
+    console.log(`Errors: ${errors}`)
+    console.log(`============================\n`)
+
+    return { updated, errors }
+  } catch (err) {
+    console.error('Error in recalculateAirFreightProducts:', err)
+    throw err
+  }
+}
+
 // GET all freight rates (sorted by most recent)
 router.get('/', async (req, res) => {
   try {
@@ -16,7 +197,6 @@ router.get('/', async (req, res) => {
 
     if (error) throw error
 
-    console.log('Fetched rates sample:', rates?.[0]) // Debug log
     res.json(rates)
   } catch (err) {
     console.error('Error fetching freight rates:', err)
@@ -99,7 +279,7 @@ router.get('/country/:country/latest', async (req, res) => {
   }
 })
 
-// POST - Create new freight rate with weight tiers and airport info
+// POST - Create new freight rate and recalculate affected products
 router.post('/', async (req, res) => {
   try {
     const { 
@@ -113,15 +293,6 @@ router.post('/', async (req, res) => {
       date 
     } = req.body
 
-    // DEBUG: Log incoming data
-    console.log('=== POST Request Data ===')
-    console.log('Country:', country)
-    console.log('Airport Code:', airport_code)
-    console.log('Airport Name:', airport_name)
-    console.log('Rates:', { rate_45kg, rate_100kg, rate_300kg, rate_500kg })
-    console.log('Date:', date)
-    console.log('========================')
-
     if (!country || !airport_code || !airport_name || 
         !rate_45kg || !rate_100kg || !rate_300kg || !rate_500kg) {
       return res.status(400).json({ 
@@ -129,7 +300,6 @@ router.post('/', async (req, res) => {
       })
     }
 
-    // Validate all rates are positive
     if (parseFloat(rate_45kg) <= 0 || parseFloat(rate_100kg) <= 0 || 
         parseFloat(rate_300kg) <= 0 || parseFloat(rate_500kg) <= 0) {
       return res.status(400).json({ message: 'All rates must be greater than 0' })
@@ -147,9 +317,6 @@ router.post('/', async (req, res) => {
       updated_at: new Date().toISOString()
     }
 
-    // DEBUG: Log data being inserted
-    console.log('Inserting data:', insertData)
-
     const { data: newRate, error } = await supabase
       .from('freight_rates')
       .insert(insertData)
@@ -161,12 +328,25 @@ router.post('/', async (req, res) => {
       throw error
     }
 
-    // DEBUG: Log returned data
-    console.log('Inserted record:', newRate)
+    // Recalculate affected products
+    const recalcResult = await recalculateAirFreightProducts(
+      insertData.country,
+      insertData.airport_code,
+      {
+        rate_45kg: insertData.rate_45kg,
+        rate_100kg: insertData.rate_100kg,
+        rate_300kg: insertData.rate_300kg,
+        rate_500kg: insertData.rate_500kg
+      }
+    )
 
     res.status(201).json({
       message: 'Freight rate added successfully',
-      data: newRate
+      data: newRate,
+      recalculation: {
+        productsUpdated: recalcResult.updated,
+        errors: recalcResult.errors
+      }
     })
   } catch (err) {
     console.error('Error adding freight rate:', err)
@@ -174,7 +354,7 @@ router.post('/', async (req, res) => {
   }
 })
 
-// PUT - Update existing freight rate
+// PUT - Update existing freight rate and recalculate affected products
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params
@@ -189,14 +369,6 @@ router.put('/:id', async (req, res) => {
       date 
     } = req.body
 
-    // DEBUG: Log incoming data
-    console.log('=== PUT Request Data ===')
-    console.log('ID:', id)
-    console.log('Country:', country)
-    console.log('Airport Code:', airport_code)
-    console.log('Airport Name:', airport_name)
-    console.log('========================')
-
     if (!country || !airport_code || !airport_name || 
         !rate_45kg || !rate_100kg || !rate_300kg || !rate_500kg) {
       return res.status(400).json({ 
@@ -204,7 +376,6 @@ router.put('/:id', async (req, res) => {
       })
     }
 
-    // Validate all rates are positive
     if (parseFloat(rate_45kg) <= 0 || parseFloat(rate_100kg) <= 0 || 
         parseFloat(rate_300kg) <= 0 || parseFloat(rate_500kg) <= 0) {
       return res.status(400).json({ message: 'All rates must be greater than 0' })
@@ -222,9 +393,6 @@ router.put('/:id', async (req, res) => {
       updated_at: new Date().toISOString()
     }
 
-    // DEBUG: Log data being updated
-    console.log('Updating with data:', updateData)
-
     const { data: updatedRate, error } = await supabase
       .from('freight_rates')
       .update(updateData)
@@ -237,12 +405,25 @@ router.put('/:id', async (req, res) => {
       throw error
     }
 
-    // DEBUG: Log returned data
-    console.log('Updated record:', updatedRate)
+    // Recalculate affected products
+    const recalcResult = await recalculateAirFreightProducts(
+      updateData.country,
+      updateData.airport_code,
+      {
+        rate_45kg: updateData.rate_45kg,
+        rate_100kg: updateData.rate_100kg,
+        rate_300kg: updateData.rate_300kg,
+        rate_500kg: updateData.rate_500kg
+      }
+    )
 
     res.json({
       message: 'Freight rate updated successfully',
-      data: updatedRate
+      data: updatedRate,
+      recalculation: {
+        productsUpdated: recalcResult.updated,
+        errors: recalcResult.errors
+      }
     })
   } catch (err) {
     console.error('Error updating freight rate:', err)
@@ -275,7 +456,6 @@ router.get('/date/:date/country/:country/airport/:airport_code', async (req, res
     const { date, country, airport_code } = req.params
     const searchDate = new Date(date)
     
-    // Get start and end of day
     const startOfDay = new Date(searchDate.setHours(0, 0, 0, 0)).toISOString()
     const endOfDay = new Date(searchDate.setHours(23, 59, 59, 999)).toISOString()
 
@@ -310,7 +490,6 @@ router.get('/date/:date/country/:country', async (req, res) => {
     const { date, country } = req.params
     const searchDate = new Date(date)
     
-    // Get start and end of day
     const startOfDay = new Date(searchDate.setHours(0, 0, 0, 0)).toISOString()
     const endOfDay = new Date(searchDate.setHours(23, 59, 59, 999)).toISOString()
 

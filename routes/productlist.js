@@ -96,12 +96,23 @@ router.post('/upload', upload.single('image'), async (req, res) => {
   }
 })
 
+// In your product routes file - update the PUT /upload/:id route
+
 // PUT - Update product with variants
 router.put('/upload/:id', upload.single('image'), async (req, res) => {
   const { common_name, scientific_name, category, existing_image_url, variants } = req.body
   let image_url = existing_image_url
 
   try {
+    // Get the current product to check for purchase price changes
+    const { data: currentProduct, error: fetchError } = await supabase
+      .from('products')
+      .select('variants')
+      .eq('id', req.params.id)
+      .single()
+
+    if (fetchError) throw fetchError
+
     if (req.file) {
       const fileName = `${Date.now()}${path.extname(req.file.originalname)}`
       await supabase.storage
@@ -120,7 +131,8 @@ router.put('/upload/:id', upload.single('image'), async (req, res) => {
     // Parse variants if it's a string
     const variantsData = typeof variants === 'string' ? JSON.parse(variants) : (variants || [])
 
-    const { error } = await supabase
+    // Update product
+    const { error: updateError } = await supabase
       .from('products')
       .update({ 
         common_name, 
@@ -131,8 +143,87 @@ router.put('/upload/:id', upload.single('image'), async (req, res) => {
       })
       .eq('id', req.params.id)
 
-    if (error) throw error
+    if (updateError) throw updateError
 
+    // Check if purchase prices have changed and update customer prices
+    if (currentProduct && currentProduct.variants) {
+      const oldVariants = currentProduct.variants
+      const newVariants = variantsData
+
+      // Find variants where purchase price changed
+      const priceChanges = []
+      
+      newVariants.forEach(newVariant => {
+        const oldVariant = oldVariants.find(v => v.id === newVariant.id)
+        if (oldVariant && oldVariant.purchasing_price !== newVariant.purchasing_price) {
+          priceChanges.push({
+            variantId: newVariant.id,
+            oldPrice: oldVariant.purchasing_price,
+            newPrice: newVariant.purchasing_price
+          })
+        }
+      })
+
+      // Update customer prices for affected variants
+      if (priceChanges.length > 0) {
+        for (const change of priceChanges) {
+          // Get all customer prices for this product/variant
+          const { data: customerPrices, error: fetchPricesError } = await supabase
+            .from('customer_product')
+            .select('*')
+            .eq('product_id', req.params.id)
+            .eq('variant_id', change.variantId)
+
+          if (fetchPricesError) {
+            console.error('Error fetching customer prices:', fetchPricesError)
+            continue
+          }
+
+          // Update each customer price
+          for (const customerPrice of customerPrices) {
+            const priceDifference = change.newPrice - change.oldPrice
+            
+            // Recalculate based on existing margin or margin percentage
+            let newSellingPrice
+            let newMargin
+            let newMarginPercentage
+
+            if (customerPrice.margin_percentage > 0) {
+              // Recalculate using margin percentage
+              newMargin = (change.newPrice * customerPrice.margin_percentage) / 100
+              newSellingPrice = change.newPrice + newMargin
+              newMarginPercentage = customerPrice.margin_percentage
+            } else if (customerPrice.margin > 0) {
+              // Keep same margin amount
+              newMargin = customerPrice.margin
+              newSellingPrice = change.newPrice + newMargin
+              newMarginPercentage = (newMargin / newSellingPrice) * 100
+            } else {
+              // Just add the price difference
+              newSellingPrice = customerPrice.selling_price + priceDifference
+              newMargin = customerPrice.margin
+              newMarginPercentage = customerPrice.margin_percentage
+            }
+
+            const { error: updatePriceError } = await supabase
+              .from('customer_product')
+              .update({
+                purchasing_price: change.newPrice,
+                selling_price: newSellingPrice,
+                margin: newMargin,
+                margin_percentage: newMarginPercentage
+              })
+              .eq('id', customerPrice.id)
+
+            if (updatePriceError) {
+              console.error('Error updating customer price:', updatePriceError)
+            }
+          }
+        }
+      }
+    }
+
+    // Fetch and return updated product
     const { data } = await supabase
       .from('products')
       .select('*')
@@ -238,8 +329,12 @@ router.put('/:productId/variants/:variantId', async (req, res) => {
 
     if (fetchError) throw fetchError
 
-    // Update the specific variant
+    // Find the variant being updated to get old price
     const currentVariants = product.variants || []
+    const oldVariant = currentVariants.find(v => v.id == variantId)
+    const oldPrice = oldVariant?.purchasing_price
+
+    // Update the specific variant
     const updatedVariants = currentVariants.map(v => 
       v.id == variantId 
         ? { 
@@ -259,6 +354,11 @@ router.put('/:productId/variants/:variantId', async (req, res) => {
 
     if (updateError) throw updateError
 
+    // If purchase price changed, update customer prices
+    if (oldPrice && oldPrice !== parseFloat(purchasing_price)) {
+      await updateCustomerPricesForVariant(productId, variantId, parseFloat(purchasing_price), oldPrice)
+    }
+
     const updatedVariant = updatedVariants.find(v => v.id == variantId)
     res.json(updatedVariant)
   } catch (err) {
@@ -266,6 +366,65 @@ router.put('/:productId/variants/:variantId', async (req, res) => {
     res.status(500).json({ error: 'Database error', details: err.message })
   }
 })
+
+// Helper function to update customer prices
+async function updateCustomerPricesForVariant(productId, variantId, newPrice, oldPrice) {
+  try {
+    // Get all customer prices for this product/variant
+    const { data: customerPrices, error: fetchPricesError } = await supabase
+      .from('customer_product')
+      .select('*')
+      .eq('product_id', productId)
+      .eq('variant_id', variantId)
+
+    if (fetchPricesError) {
+      console.error('Error fetching customer prices:', fetchPricesError)
+      return
+    }
+
+    // Update each customer price
+    for (const customerPrice of customerPrices) {
+      const priceDifference = newPrice - oldPrice
+      
+      let newSellingPrice
+      let newMargin
+      let newMarginPercentage
+
+      if (customerPrice.margin_percentage > 0) {
+        // Recalculate using margin percentage
+        newMargin = (newPrice * customerPrice.margin_percentage) / 100
+        newSellingPrice = newPrice + newMargin
+        newMarginPercentage = customerPrice.margin_percentage
+      } else if (customerPrice.margin > 0) {
+        // Keep same margin amount
+        newMargin = customerPrice.margin
+        newSellingPrice = newPrice + newMargin
+        newMarginPercentage = (newMargin / newSellingPrice) * 100
+      } else {
+        // Just add the price difference
+        newSellingPrice = customerPrice.selling_price + priceDifference
+        newMargin = customerPrice.margin
+        newMarginPercentage = customerPrice.margin_percentage
+      }
+
+      const { error: updatePriceError } = await supabase
+        .from('customer_product')
+        .update({
+          purchasing_price: newPrice,
+          selling_price: newSellingPrice,
+          margin: newMargin,
+          margin_percentage: newMarginPercentage
+        })
+        .eq('id', customerPrice.id)
+
+      if (updatePriceError) {
+        console.error('Error updating customer price:', updatePriceError)
+      }
+    }
+  } catch (err) {
+    console.error('Error in updateCustomerPricesForVariant:', err)
+  }
+}
 
 // DELETE - Remove a specific variant
 router.delete('/:productId/variants/:variantId', async (req, res) => {

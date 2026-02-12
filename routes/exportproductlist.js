@@ -96,12 +96,97 @@ router.post('/upload', upload.single('image'), async (req, res) => {
   }
 })
 
+// In your export product routes file - update the PUT /upload/:id route
+
+// Helper function to update export customer prices when variant changes
+async function updateExportCustomerPricesForVariant(productId, variantId, newExFactoryPrice, oldExFactoryPrice, newPurchasePrice, oldPurchasePrice) {
+  try {
+    // Get all customer prices for this product/variant
+    const { data: customerPrices, error: fetchPricesError } = await supabase
+      .from('exportcustomer_product')
+      .select('*')
+      .eq('product_id', productId)
+      .eq('variant_id', variantId)
+
+    if (fetchPricesError) {
+      console.error('Error fetching export customer prices:', fetchPricesError)
+      return
+    }
+
+    // Update each customer price
+    for (const customerPrice of customerPrices) {
+      // Recalculate FOB price based on new ex-factory price
+      const exFactoryDiff = newExFactoryPrice - oldExFactoryPrice
+      const newFobPrice = parseFloat(customerPrice.fob_price) + exFactoryDiff
+
+      // Get freight cost (stored in USD)
+      const freightCostUSD = parseFloat(customerPrice.freight_cost) || 0
+
+      // Recalculate CNF
+      // First, get current USD rate to convert FOB to USD
+      const { data: usdRateData } = await supabase
+        .from('usd_rate')
+        .select('rate')
+        .order('date', { ascending: false })
+        .limit(1)
+        .single()
+
+      const usdRate = usdRateData?.rate || 300 // fallback rate
+
+      // Convert new FOB price to USD
+      const fobInUSD = newFobPrice / usdRate
+      
+      // Calculate new CNF
+      const newCNF = fobInUSD + freightCostUSD
+
+      // Prepare update object
+      const updateData = {
+        purchasing_price: newPurchasePrice,
+        exfactoryprice: newExFactoryPrice,
+        fob_price: newFobPrice,
+        cnf: newCNF
+      }
+
+      // If margin percentage or margin exists, recalculate those too
+      if (customerPrice.margin_percentage > 0) {
+        // Keep same margin percentage, recalculate margin
+        const margin = (newExFactoryPrice * customerPrice.margin_percentage) / 100
+        updateData.margin = margin
+      } else if (customerPrice.margin > 0) {
+        // Keep same margin amount, recalculate percentage
+        const marginPercentage = (customerPrice.margin / newExFactoryPrice) * 100
+        updateData.margin_percentage = marginPercentage
+      }
+
+      const { error: updatePriceError } = await supabase
+        .from('exportcustomer_product')
+        .update(updateData)
+        .eq('id', customerPrice.id)
+
+      if (updatePriceError) {
+        console.error('Error updating export customer price:', updatePriceError)
+      }
+    }
+  } catch (err) {
+    console.error('Error in updateExportCustomerPricesForVariant:', err)
+  }
+}
+
 // PUT - Update product with variants
 router.put('/upload/:id', upload.single('image'), async (req, res) => {
   const { common_name, scientific_name, category, existing_image_url, variants } = req.body
   let image_url = existing_image_url
 
   try {
+    // Get the current product to check for price changes
+    const { data: currentProduct, error: fetchError } = await supabase
+      .from('exportproducts')
+      .select('variants')
+      .eq('id', req.params.id)
+      .single()
+
+    if (fetchError) throw fetchError
+
     if (req.file) {
       const fileName = `${Date.now()}${extname(req.file.originalname)}`
       await supabase.storage
@@ -120,7 +205,8 @@ router.put('/upload/:id', upload.single('image'), async (req, res) => {
     // Parse variants if it's a string
     const variantsData = typeof variants === 'string' ? JSON.parse(variants) : (variants || [])
 
-    const { error } = await supabase
+    // Update product
+    const { error: updateError } = await supabase
       .from('exportproducts')
       .update({
         common_name,
@@ -131,8 +217,36 @@ router.put('/upload/:id', upload.single('image'), async (req, res) => {
       })
       .eq('id', req.params.id)
 
-    if (error) throw error
+    if (updateError) throw updateError
 
+    // Check if prices have changed and update customer prices
+    if (currentProduct && currentProduct.variants) {
+      const oldVariants = currentProduct.variants
+      const newVariants = variantsData
+
+      // Find variants where prices changed
+      for (const newVariant of newVariants) {
+        const oldVariant = oldVariants.find(v => v.id === newVariant.id)
+        
+        if (oldVariant) {
+          const purchasePriceChanged = oldVariant.purchasing_price !== newVariant.purchasing_price
+          const exFactoryPriceChanged = oldVariant.exfactoryprice !== newVariant.exfactoryprice
+
+          if (purchasePriceChanged || exFactoryPriceChanged) {
+            await updateExportCustomerPricesForVariant(
+              req.params.id,
+              newVariant.id,
+              newVariant.exfactoryprice,
+              oldVariant.exfactoryprice,
+              newVariant.purchasing_price,
+              oldVariant.purchasing_price
+            )
+          }
+        }
+      }
+    }
+
+    // Fetch and return updated product
     const { data } = await supabase
       .from('exportproducts')
       .select('*')
@@ -185,7 +299,19 @@ router.get('/:productId/variants', async (req, res) => {
 
 // POST - Add new variant to a product
 router.post('/:productId/variants', async (req, res) => {
-  const { size, unit, purchasing_price, usdrate, labour_overhead, packing_cost, profit, profit_margin, exfactoryprice } = req.body
+  const { 
+    size, 
+    unit, 
+    purchasing_price, 
+    usdrate, 
+    labour_overhead, 
+    packing_cost, 
+    profit, 
+    profit_margin, 
+    exfactoryprice ,
+    multiplier,  // ADD THIS
+    divisor      // ADD THIS
+  } = req.body
   const { productId } = req.params
 
   try {
@@ -201,7 +327,7 @@ router.post('/:productId/variants', async (req, res) => {
     // Add new variant with unique ID
     const currentVariants = product.variants || []
     const newVariant = {
-      id: Date.now(), // Simple unique ID
+      id: Date.now(),
       size,
       unit,
       purchasing_price: parseFloat(purchasing_price),
@@ -210,7 +336,9 @@ router.post('/:productId/variants', async (req, res) => {
       packing_cost: parseFloat(packing_cost),
       profit: parseFloat(profit),
       profit_margin: parseFloat(profit_margin),
-      exfactoryprice: parseFloat(exfactoryprice)
+      exfactoryprice: parseFloat(exfactoryprice),
+      multiplier: parseFloat(multiplier) || 0,  // ADD THIS
+    divisor: parseFloat(divisor) || 1         // ADD THIS
     }
     const updatedVariants = [...currentVariants, newVariant]
 
@@ -231,7 +359,17 @@ router.post('/:productId/variants', async (req, res) => {
 
 // PUT - Update a specific variant
 router.put('/:productId/variants/:variantId', async (req, res) => {
-  const { size, unit, purchasing_price, usdrate, labour_overhead, packing_cost, profit, profit_margin, exfactoryprice } = req.body
+  const { 
+    size, 
+    unit, 
+    purchasing_price, 
+    usdrate, 
+    labour_overhead, 
+    packing_cost, 
+    profit, 
+    profit_margin, 
+    exfactoryprice 
+  } = req.body
   const { productId, variantId } = req.params
 
   try {
@@ -244,22 +382,27 @@ router.put('/:productId/variants/:variantId', async (req, res) => {
 
     if (fetchError) throw fetchError
 
-    // Update the specific variant
+    // Find the variant being updated to get old prices
     const currentVariants = product.variants || []
+    const oldVariant = currentVariants.find(v => v.id == variantId)
+    const oldExFactoryPrice = oldVariant?.exfactoryprice
+    const oldPurchasePrice = oldVariant?.purchasing_price
+
+    // Update the specific variant
     const updatedVariants = currentVariants.map(v =>
       v.id == variantId
         ? {
-          ...v,
-          size,
-          unit,
-          purchasing_price: parseFloat(purchasing_price),
-          usdrate: parseFloat(usdrate),
-          labour_overhead: parseFloat(labour_overhead),
-          packing_cost: parseFloat(packing_cost),
-          profit: parseFloat(profit),
-          profit_margin: parseFloat(profit_margin),
-          exfactoryprice: parseFloat(exfactoryprice)
-        }
+            ...v,
+            size,
+            unit,
+            purchasing_price: parseFloat(purchasing_price),
+            usdrate: parseFloat(usdrate),
+            labour_overhead: parseFloat(labour_overhead),
+            packing_cost: parseFloat(packing_cost),
+            profit: parseFloat(profit),
+            profit_margin: parseFloat(profit_margin),
+            exfactoryprice: parseFloat(exfactoryprice)
+          }
         : v
     )
 
@@ -270,6 +413,18 @@ router.put('/:productId/variants/:variantId', async (req, res) => {
       .eq('id', productId)
 
     if (updateError) throw updateError
+
+    // If ex-factory price changed, update customer prices
+    if (oldExFactoryPrice && oldExFactoryPrice !== parseFloat(exfactoryprice)) {
+      await updateExportCustomerPricesForVariant(
+        productId,
+        variantId,
+        parseFloat(exfactoryprice),
+        oldExFactoryPrice,
+        parseFloat(purchasing_price),
+        oldPurchasePrice
+      )
+    }
 
     const updatedVariant = updatedVariants.find(v => v.id == variantId)
     res.json(updatedVariant)

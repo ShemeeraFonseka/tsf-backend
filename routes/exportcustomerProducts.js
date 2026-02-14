@@ -24,13 +24,20 @@ router.get('/:cus_id', async (req, res) => {
         forwardHandling_cost,
         multiplier,
         divisor,
-        freight_cost,
-        gross_weight_tier,
-        container_type,
         freight_type,
         fob_price,
-        cnf,
-        product_id
+        product_id,
+        freight_cost_45kg,
+        freight_cost_100kg,
+        freight_cost_300kg,
+        freight_cost_500kg,
+        cnf_45kg,
+        cnf_100kg,
+        cnf_300kg,
+        cnf_500kg,
+        container_type,
+        freight_cost_sea,
+        cnf_sea
       `)
       .eq('cus_id', cus_id)
       .order('common_name')

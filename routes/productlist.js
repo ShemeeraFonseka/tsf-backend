@@ -19,7 +19,29 @@ router.get('/', async (req, res) => {
 
     if (error) throw error
 
-    res.json(products)
+    // Sort products by their lowest variant price
+    const sortedProducts = products.map(product => {
+      // Sort variants within each product by purchasing_price
+      if (product.variants && product.variants.length > 0) {
+        product.variants.sort((a, b) => {
+          return parseFloat(a.purchasing_price) - parseFloat(b.purchasing_price)
+        })
+      }
+      return product
+    }).sort((a, b) => {
+      // Sort products by their lowest variant price
+      const priceA = a.variants && a.variants.length > 0
+        ? Math.min(...a.variants.map(v => parseFloat(v.purchasing_price)))
+        : Infinity
+      
+      const priceB = b.variants && b.variants.length > 0
+        ? Math.min(...b.variants.map(v => parseFloat(v.purchasing_price)))
+        : Infinity
+      
+      return priceA - priceB
+    })
+
+    res.json(sortedProducts)
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: 'Database error', details: err.message })
@@ -51,7 +73,7 @@ router.get('/:id', async (req, res) => {
 
 // POST - Add new product with variants
 router.post('/upload', upload.single('image'), async (req, res) => {
-  const { common_name, scientific_name, category, variants } = req.body
+  const { common_name, scientific_name, category, species_type, variants } = req.body
   let image_url = null
 
   try {
@@ -81,6 +103,7 @@ router.post('/upload', upload.single('image'), async (req, res) => {
         common_name, 
         scientific_name, 
         category, 
+        species_type,
         image_url,
         variants: variantsData
       })
@@ -96,11 +119,9 @@ router.post('/upload', upload.single('image'), async (req, res) => {
   }
 })
 
-// In your product routes file - update the PUT /upload/:id route
-
 // PUT - Update product with variants
 router.put('/upload/:id', upload.single('image'), async (req, res) => {
-  const { common_name, scientific_name, category, existing_image_url, variants } = req.body
+  const { common_name, scientific_name, category, species_type, existing_image_url, variants } = req.body
   let image_url = existing_image_url
 
   try {
@@ -137,7 +158,8 @@ router.put('/upload/:id', upload.single('image'), async (req, res) => {
       .update({ 
         common_name, 
         scientific_name, 
-        category, 
+        category,
+        species_type, 
         image_url,
         variants: variantsData
       })

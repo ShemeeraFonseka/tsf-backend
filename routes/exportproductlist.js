@@ -19,7 +19,29 @@ router.get('/', async (req, res) => {
 
     if (error) throw error
 
-    res.json(products)
+    // Sort products by their lowest variant price
+    const sortedProducts = products.map(product => {
+      // Sort variants within each product by purchasing_price
+      if (product.variants && product.variants.length > 0) {
+        product.variants.sort((a, b) => {
+          return parseFloat(a.purchasing_price) - parseFloat(b.purchasing_price)
+        })
+      }
+      return product
+    }).sort((a, b) => {
+      // Sort products by their lowest variant price
+      const priceA = a.variants && a.variants.length > 0
+        ? Math.min(...a.variants.map(v => parseFloat(v.purchasing_price)))
+        : Infinity
+      
+      const priceB = b.variants && b.variants.length > 0
+        ? Math.min(...b.variants.map(v => parseFloat(v.purchasing_price)))
+        : Infinity
+      
+      return priceA - priceB
+    })
+
+    res.json(sortedProducts)
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: 'Database error', details: err.message })
@@ -51,7 +73,7 @@ router.get('/:id', async (req, res) => {
 
 // POST - Add new product with variants
 router.post('/upload', upload.single('image'), async (req, res) => {
-  const { common_name, scientific_name, category, variants } = req.body
+  const { common_name, scientific_name, category, species_type, variants } = req.body
   let image_url = null
 
   try {
@@ -81,6 +103,7 @@ router.post('/upload', upload.single('image'), async (req, res) => {
         common_name,
         scientific_name,
         category,
+        species_type,
         image_url,
         variants: variantsData
       })
@@ -95,8 +118,6 @@ router.post('/upload', upload.single('image'), async (req, res) => {
     res.status(500).json({ error: err.message })
   }
 })
-
-// In your export product routes file - update the PUT /upload/:id route
 
 // Helper function to update export customer prices when variant changes
 async function updateExportCustomerPricesForVariant(productId, variantId, newExFactoryPrice, oldExFactoryPrice, newPurchasePrice, oldPurchasePrice) {
@@ -174,7 +195,7 @@ async function updateExportCustomerPricesForVariant(productId, variantId, newExF
 
 // PUT - Update product with variants
 router.put('/upload/:id', upload.single('image'), async (req, res) => {
-  const { common_name, scientific_name, category, existing_image_url, variants } = req.body
+  const { common_name, scientific_name, category, species_type, existing_image_url, variants } = req.body
   let image_url = existing_image_url
 
   try {
@@ -212,6 +233,7 @@ router.put('/upload/:id', upload.single('image'), async (req, res) => {
         common_name,
         scientific_name,
         category,
+        species_type,
         image_url,
         variants: variantsData
       })
@@ -308,9 +330,9 @@ router.post('/:productId/variants', async (req, res) => {
     packing_cost, 
     profit, 
     profit_margin, 
-    exfactoryprice ,
-    multiplier,  // ADD THIS
-    divisor      // ADD THIS
+    exfactoryprice,
+    multiplier,
+    divisor
   } = req.body
   const { productId } = req.params
 
@@ -337,8 +359,8 @@ router.post('/:productId/variants', async (req, res) => {
       profit: parseFloat(profit),
       profit_margin: parseFloat(profit_margin),
       exfactoryprice: parseFloat(exfactoryprice),
-      multiplier: parseFloat(multiplier) || 0,  // ADD THIS
-    divisor: parseFloat(divisor) || 1         // ADD THIS
+      multiplier: parseFloat(multiplier) || 0,
+      divisor: parseFloat(divisor) || 1
     }
     const updatedVariants = [...currentVariants, newVariant]
 
@@ -368,7 +390,9 @@ router.put('/:productId/variants/:variantId', async (req, res) => {
     packing_cost, 
     profit, 
     profit_margin, 
-    exfactoryprice 
+    exfactoryprice,
+    multiplier,
+    divisor
   } = req.body
   const { productId, variantId } = req.params
 
@@ -401,7 +425,9 @@ router.put('/:productId/variants/:variantId', async (req, res) => {
             packing_cost: parseFloat(packing_cost),
             profit: parseFloat(profit),
             profit_margin: parseFloat(profit_margin),
-            exfactoryprice: parseFloat(exfactoryprice)
+            exfactoryprice: parseFloat(exfactoryprice),
+            multiplier: parseFloat(multiplier) || 0,
+            divisor: parseFloat(divisor) || 1
           }
         : v
     )

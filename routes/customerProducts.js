@@ -3,7 +3,7 @@ import supabase from '../db.js'
 
 const router = express.Router()
 
-// Get price list for a customer
+// Get price list for a customer — joins products table to get image_url
 router.get('/:cus_id', async (req, res) => {
   try {
     const { cus_id } = req.params
@@ -13,13 +13,16 @@ router.get('/:cus_id', async (req, res) => {
       .select(`
         id,
         common_name,
+        scientific_name,
         category,
         size_range,
         purchasing_price,
         margin,
         margin_percentage,
         selling_price,
-        product_id
+        product_id,
+        variant_id,
+        image_url
       `)
       .eq('cus_id', cus_id)
       .order('common_name')

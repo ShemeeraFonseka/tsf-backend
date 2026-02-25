@@ -13,6 +13,8 @@ router.get('/:cus_id', async (req, res) => {
       .select(`
         id,
         common_name,
+        scientific_name,
+        image_url,
         category,
         size_range,
         purchasing_price,

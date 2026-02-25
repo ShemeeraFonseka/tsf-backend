@@ -73,7 +73,7 @@ router.get('/:id', async (req, res) => {
 
 // POST - Add new product with variants
 router.post('/upload', upload.single('image'), async (req, res) => {
-  const { common_name, scientific_name, category, species_type, variants } = req.body
+  const { common_name, scientific_name, description, category, species_type, variants } = req.body
   let image_url = null
 
   try {
@@ -102,6 +102,7 @@ router.post('/upload', upload.single('image'), async (req, res) => {
       .insert({
         common_name,
         scientific_name,
+        description,
         category,
         species_type,
         image_url,
@@ -195,7 +196,7 @@ async function updateExportCustomerPricesForVariant(productId, variantId, newExF
 
 // PUT - Update product with variants
 router.put('/upload/:id', upload.single('image'), async (req, res) => {
-  const { common_name, scientific_name, category, species_type, existing_image_url, variants } = req.body
+  const { common_name, scientific_name, description, category, species_type, existing_image_url, variants } = req.body
   let image_url = existing_image_url
 
   try {
@@ -232,6 +233,7 @@ router.put('/upload/:id', upload.single('image'), async (req, res) => {
       .update({
         common_name,
         scientific_name,
+        description,
         category,
         species_type,
         image_url,

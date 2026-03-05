@@ -1,186 +1,189 @@
-import express from 'express'
-import supabase from '../db.js'
-import multer from 'multer'
-import { extname } from 'path'
+import express from "express";
+import supabase from "../db.js";
+import multer from "multer";
+import { extname } from "path";
 
-const router = express.Router()
+const router = express.Router();
 
-const storage = multer.memoryStorage()
-const upload = multer({ storage })
+const storage = multer.memoryStorage();
+const upload = multer({ storage });
 
-router.get('/', async (req, res) => {
+router.get("/", async (req, res) => {
   try {
     const { data: customers, error } = await supabase
-      .from('exportcustomers')
-      .select('*')
-      .order('cus_id')
+      .from("exportcustomers")
+      .select("*")
+      .order("cus_id");
 
-    if (error) throw error
+    if (error) throw error;
 
-    res.json(customers)
+    res.json(customers);
   } catch (err) {
-    console.error(err)
-    res.status(500).json({ error: 'Database error', details: err.message })
+    console.error(err);
+    res.status(500).json({ error: "Database error", details: err.message });
   }
-})
+});
 
-router.get('/:id', async (req, res) => {
+router.get("/:id", async (req, res) => {
   try {
     const { data: customer, error } = await supabase
-      .from('exportcustomers')
-      .select('*')
-      .eq('cus_id', req.params.id)
-      .single()
+      .from("exportcustomers")
+      .select("*")
+      .eq("cus_id", req.params.id)
+      .single();
 
     if (error) {
-      if (error.code === 'PGRST116') {
-        return res.status(404).json({ error: 'Customer not found' })
+      if (error.code === "PGRST116") {
+        return res.status(404).json({ error: "Customer not found" });
       }
-      throw error
+      throw error;
     }
 
-    res.json(customer)
+    res.json(customer);
   } catch (err) {
-    console.error(err)
-    res.status(500).json({ error: 'Database error', details: err.message })
+    console.error(err);
+    res.status(500).json({ error: "Database error", details: err.message });
   }
-})
+});
 
-router.post('/upload', upload.single('image'), async (req, res) => {
-  const { 
-    cus_name, 
-    company_name, 
-    phone, 
-    address, 
-    country, 
+router.post("/upload", upload.single("image"), async (req, res) => {
+  const {
+    cus_name,
+    company_name,
+    phone,
+    address,
+    country,
     airport_code,
     airport_name,
-    email 
-  } = req.body
-  let image_url = null
+    port_code, // ✅ added
+    port_name, // ✅ added
+    email,
+  } = req.body;
+  let image_url = null;
 
   try {
-    // Upload image to Supabase Storage if provided
     if (req.file) {
-      const fileName = `${Date.now()}${extname(req.file.originalname)}`
+      const fileName = `${Date.now()}${extname(req.file.originalname)}`;
       const { data: uploadData, error: uploadError } = await supabase.storage
-        .from('customer-images')
+        .from("customer-images")
         .upload(fileName, req.file.buffer, {
-          contentType: req.file.mimetype
-        })
+          contentType: req.file.mimetype,
+        });
 
-      if (uploadError) throw uploadError
+      if (uploadError) throw uploadError;
 
-      // Get public URL
-      const { data: { publicUrl } } = supabase.storage
-        .from('customer-images')
-        .getPublicUrl(fileName)
+      const {
+        data: { publicUrl },
+      } = supabase.storage.from("customer-images").getPublicUrl(fileName);
 
-      image_url = publicUrl
+      image_url = publicUrl;
     }
 
-    // Insert customer
     const { data: customer, error: customerError } = await supabase
-      .from('exportcustomers')
+      .from("exportcustomers")
       .insert({
         cus_name,
         company_name,
         phone,
-        address, 
-        country, 
+        address,
+        country,
         airport_code: airport_code ? airport_code.toUpperCase() : null,
         airport_name: airport_name || null,
+        port_code: port_code ? port_code.toUpperCase() : null, // ✅ added
+        port_name: port_name || null, // ✅ added
         email,
-        image_url
+        image_url,
       })
       .select()
-      .single()
+      .single();
 
-    if (customerError) throw customerError
+    if (customerError) throw customerError;
 
-    res.status(201).json(customer)
+    res.status(201).json(customer);
   } catch (err) {
-    console.error(err)
-    res.status(500).json({ error: 'Database error', details: err.message })
+    console.error(err);
+    res.status(500).json({ error: "Database error", details: err.message });
   }
-})
+});
 
 // PUT - Update customer
-router.put('/upload/:id', upload.single('image'), async (req, res) => {
-  const { 
-    cus_name, 
-    company_name, 
-    phone, 
-    address, 
-    country, 
+router.put("/upload/:id", upload.single("image"), async (req, res) => {
+  const {
+    cus_name,
+    company_name,
+    phone,
+    address,
+    country,
     airport_code,
     airport_name,
-    email, 
-    existing_image_url 
-  } = req.body
-  let image_url = existing_image_url
+    port_code, // ✅ added
+    port_name, // ✅ added
+    email,
+    existing_image_url,
+  } = req.body;
+  let image_url = existing_image_url;
 
   try {
-    // Upload new image if provided
     if (req.file) {
-      const fileName = `${Date.now()}${extname(req.file.originalname)}`
+      const fileName = `${Date.now()}${extname(req.file.originalname)}`;
       const { data: uploadData, error: uploadError } = await supabase.storage
-        .from('customer-images')
+        .from("customer-images")
         .upload(fileName, req.file.buffer, {
-          contentType: req.file.mimetype
-        })
+          contentType: req.file.mimetype,
+        });
 
-      if (uploadError) throw uploadError
+      if (uploadError) throw uploadError;
 
-      const { data: { publicUrl } } = supabase.storage
-        .from('customer-images')
-        .getPublicUrl(fileName)
+      const {
+        data: { publicUrl },
+      } = supabase.storage.from("customer-images").getPublicUrl(fileName);
 
-      image_url = publicUrl
+      image_url = publicUrl;
     }
 
-    // Update customer
     const { data: customer, error: updateError } = await supabase
-      .from('exportcustomers')
+      .from("exportcustomers")
       .update({
         cus_name,
         company_name,
         phone,
-        address, 
-        country, 
+        address,
+        country,
         airport_code: airport_code ? airport_code.toUpperCase() : null,
         airport_name: airport_name || null,
+        port_code: port_code ? port_code.toUpperCase() : null, // ✅ added
+        port_name: port_name || null, // ✅ added
         email,
-        image_url
+        image_url,
       })
-      .eq('cus_id', req.params.id)
+      .eq("cus_id", req.params.id)
       .select()
-      .single()
+      .single();
 
-    if (updateError) throw updateError
+    if (updateError) throw updateError;
 
-    res.json(customer)
+    res.json(customer);
   } catch (err) {
-    console.error(err)
-    res.status(500).json({ error: 'Database error', details: err.message })
+    console.error(err);
+    res.status(500).json({ error: "Database error", details: err.message });
   }
-})
+});
 
 // DELETE customer
-router.delete('/:id', async (req, res) => {
+router.delete("/:id", async (req, res) => {
   try {
     const { error } = await supabase
-      .from('exportcustomers')
+      .from("exportcustomers")
       .delete()
-      .eq('cus_id', req.params.id)
+      .eq("cus_id", req.params.id);
 
-    if (error) throw error
+    if (error) throw error;
 
-    res.json({ message: 'Customer deleted' })
+    res.json({ message: "Customer deleted" });
   } catch (err) {
-    console.error(err)
-    res.status(500).json({ error: 'Database error', details: err.message })
+    console.error(err);
+    res.status(500).json({ error: "Database error", details: err.message });
   }
-})
+});
 
-export default router
+export default router;

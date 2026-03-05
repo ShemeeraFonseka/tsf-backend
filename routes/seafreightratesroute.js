@@ -1,320 +1,294 @@
-import express from 'express'
-import supabase from '../db.js'
+import express from "express";
+import supabase from "../db.js";
 
-const router = express.Router()
+const router = express.Router();
 
-// Helper function to recalculate products affected by sea freight rate change
-const recalculateSeaFreightProducts = async (country, portCode, newRateData) => {
+const recalculateSeaFreightProducts = async (
+  country,
+  portCode,
+  newRateData,
+) => {
   try {
-    console.log(`Starting sea freight recalculation for ${country} - ${portCode}`)
-    
+    console.log(`\n=== Starting Sea Freight Recalculation ===`);
+    console.log(`Country: ${country}, Port: ${portCode}`);
+
     // Get current USD rate
     const { data: usdRateData, error: usdError } = await supabase
-      .from('usd_rates')
-      .select('rate')
-      .order('updated_at', { ascending: false })
+      .from("usd_rates")
+      .select("rate")
+      .order("updated_at", { ascending: false })
       .limit(1)
-      .single()
+      .single();
 
     if (usdError || !usdRateData) {
-      console.error('Could not fetch USD rate for recalculation')
-      return { updated: 0, errors: 0, message: 'USD rate not found' }
+      console.error("Could not fetch USD rate:", usdError);
+      return { updated: 0, errors: 0 };
     }
 
-    const currentUsdRate = parseFloat(usdRateData.rate)
+    const currentUsdRate = parseFloat(usdRateData.rate);
+    console.log(`USD Rate: ${currentUsdRate}`);
 
-    // Find customers with matching country and port code
-    const { data: customers, error: custError } = await supabase
-      .from('exportcustomers')
-      .select('cus_id, country, port_code')
-      .eq('country', country)
-      .eq('port_code', portCode)
+    // Find matching customers
+    const { data: allCustomers, error: custError } = await supabase
+      .from("exportcustomers")
+      .select("cus_id, cus_name, country, port_code");
 
     if (custError) {
-      console.error('Error fetching customers:', custError)
-      return { updated: 0, errors: 0, message: 'Error fetching customers' }
+      console.error("Error fetching customers:", custError);
+      return { updated: 0, errors: 0 };
     }
 
-    if (!customers || customers.length === 0) {
-      console.log('No customers found for this country/port')
-      return { updated: 0, errors: 0, message: 'No customers found' }
+    const customers = allCustomers.filter(
+      (c) =>
+        c.country &&
+        c.port_code &&
+        c.country.toLowerCase().trim() === country.toLowerCase().trim() &&
+        c.port_code.toUpperCase().trim() === portCode.toUpperCase().trim(),
+    );
+
+    console.log(`Matching customers: ${customers.length}`);
+
+    if (customers.length === 0) {
+      return { updated: 0, errors: 0 };
     }
 
-    const customerIds = customers.map(c => c.cus_id)
+    const customerIds = customers.map((c) => c.cus_id);
 
-    // Get all products for these customers with sea freight
+    // Get sea freight products for these customers
     const { data: products, error: fetchError } = await supabase
-      .from('exportcustomer_product')
-      .select('*')
-      .in('cus_id', customerIds)
-      .eq('freight_type', 'sea')
+      .from("exportcustomer_product")
+      .select("*")
+      .in("cus_id", customerIds)
+      .eq("freight_type", "sea");
 
-    if (fetchError) throw fetchError
+    if (fetchError) throw fetchError;
+
+    console.log(`Sea freight products found: ${products?.length || 0}`);
 
     if (!products || products.length === 0) {
-      console.log('No sea freight products found for these customers')
-      return { updated: 0, errors: 0, message: 'No products found' }
+      return { updated: 0, errors: 0 };
     }
 
-    let updated = 0
-    let errors = 0
+    const freightPerKilo20ft =
+      parseFloat(newRateData.freight_per_kilo_20ft) || 0;
+    const freightPerKilo40ft =
+      parseFloat(newRateData.freight_per_kilo_40ft) || 0;
 
-    // Recalculate each product
+    let updated = 0;
+    let errors = 0;
+
     for (const product of products) {
       try {
-        const container_type = product.container_type
+        const fobPrice = parseFloat(product.fob_price) || 0;
 
-        if (!container_type) {
-          console.log(`Skipping product ${product.id} - missing container type`)
-          continue
-        }
+        // Same formula as frontend calculateBothSeaContainers:
+        // freight_cost = freight_per_kilo (direct, no multiplier/divisor)
+        // cnf = (fob_price_lkr / usd_rate) + freight_per_kilo
+        const fobInUSD = fobPrice / currentUsdRate;
+        const cnf20ft = fobInUSD + freightPerKilo20ft;
+        const cnf40ft = fobInUSD + freightPerKilo40ft;
 
-        // Get new freight cost per kilo based on container type
-        let newFreightCost = 0
-        if (container_type === '20ft') {
-          newFreightCost = parseFloat(newRateData.freight_per_kilo_20ft) || 0
-        } else if (container_type === '40ft') {
-          newFreightCost = parseFloat(newRateData.freight_per_kilo_40ft) || 0
-        }
+        console.log(`Product ${product.id} (${product.common_name}):`);
+        console.log(`  FOB: Rs.${fobPrice} → $${fobInUSD.toFixed(4)}`);
+        console.log(
+          `  20ft → freight: $${freightPerKilo20ft}, CNF: $${cnf20ft.toFixed(2)}`,
+        );
+        console.log(
+          `  40ft → freight: $${freightPerKilo40ft}, CNF: $${cnf40ft.toFixed(2)}`,
+        );
 
-        // Get cost values (stored in USD)
-        const export_doc = parseFloat(product.export_doc) || 0
-        const transport_cost = parseFloat(product.transport_cost) || 0
-        const loading_cost = parseFloat(product.loading_cost) || 0
-        const airway_cost = parseFloat(product.airway_cost) || 0
-        const forwardHandling_cost = parseFloat(product.forwardHandling_cost) || 0
-        const exfactoryprice = parseFloat(product.exfactoryprice) || 0
-
-        // Calculate total costs in USD
-        const totalCostsUSD = export_doc + transport_cost + loading_cost + airway_cost + forwardHandling_cost
-
-        // Convert total costs to LKR
-        const totalCostsLKR = totalCostsUSD * currentUsdRate
-
-        // Calculate new FOB in LKR
-        const newFobPrice = exfactoryprice + totalCostsLKR
-
-        // Calculate new CNF in USD (FOB in USD + Freight)
-        const fobInUSD = newFobPrice / currentUsdRate
-        const newCnf = fobInUSD + newFreightCost
-
-        // Update the product
         const { error: updateError } = await supabase
-          .from('exportcustomer_product')
+          .from("exportcustomer_product")
           .update({
-            freight_cost: parseFloat(newFreightCost.toFixed(4)),
-            fob_price: parseFloat(newFobPrice.toFixed(2)),
-            cnf: parseFloat(newCnf.toFixed(2))
+            freight_cost_20ft: parseFloat(freightPerKilo20ft.toFixed(4)),
+            freight_cost_40ft: parseFloat(freightPerKilo40ft.toFixed(4)),
+            cnf_20ft: parseFloat(cnf20ft.toFixed(2)),
+            cnf_40ft: parseFloat(cnf40ft.toFixed(2)),
           })
-          .eq('id', product.id)
+          .eq("id", product.id);
 
         if (updateError) {
-          console.error(`Error updating product ${product.id}:`, updateError)
-          errors++
+          console.error(`  ❌ Error:`, updateError);
+          errors++;
         } else {
-          updated++
+          console.log(`  ✅ Updated`);
+          updated++;
         }
       } catch (err) {
-        console.error(`Error processing product ${product.id}:`, err)
-        errors++
+        console.error(`  ❌ Error processing product ${product.id}:`, err);
+        errors++;
       }
     }
 
-    console.log(`Sea freight recalculation complete: ${updated} updated, ${errors} errors`)
-    return { updated, errors }
+    console.log(`\n=== Complete: ${updated} updated, ${errors} errors ===\n`);
+    return { updated, errors };
   } catch (err) {
-    console.error('Error in recalculateSeaFreightProducts:', err)
-    throw err
+    console.error("Error in recalculateSeaFreightProducts:", err);
+    throw err;
   }
-}
+};
 
 // GET all sea freight rates
-router.get('/', async (req, res) => {
+router.get("/", async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit) || 100
-
-    const { data: rates, error } = await supabase
-      .from('sea_freight_rates')
-      .select('*')
-      .order('updated_at', { ascending: false })
-      .limit(limit)
-
-    if (error) throw error
-
-    res.json(rates)
+    const { data, error } = await supabase
+      .from("sea_freight_rates")
+      .select("*")
+      .order("date", { ascending: false });
+    if (error) throw error;
+    res.json(data);
   } catch (err) {
-    console.error('Error fetching sea freight rates:', err)
-    res.status(500).json({ message: 'Server error', error: err.message })
+    res.status(500).json({ error: err.message });
   }
-})
+});
 
-// POST - Create new sea freight rate and recalculate affected products
-router.post('/', async (req, res) => {
+// GET latest rate by country and port
+router.get("/latest/:country/:portCode", async (req, res) => {
   try {
-    const {
-      country,
-      port_code,
-      port_name,
-      rate_20ft,
-      kilos_20ft,
-      freight_per_kilo_20ft,
-      rate_40ft,
-      kilos_40ft,
-      freight_per_kilo_40ft,
-      date
-    } = req.body
+    const { country, portCode } = req.params;
+    const { data, error } = await supabase
+      .from("sea_freight_rates")
+      .select("*")
+      .eq("country", country)
+      .eq("port_code", portCode)
+      .order("date", { ascending: false })
+      .limit(1)
+      .single();
 
-    if (!country || !port_code || !port_name ||
-        !rate_20ft || !kilos_20ft || !rate_40ft || !kilos_40ft) {
-      return res.status(400).json({
-        message: 'Country, port code, port name, and all container rates/kilos are required'
-      })
+    if (error) {
+      if (error.code === "PGRST116")
+        return res.status(404).json({ message: "No rate found" });
+      throw error;
     }
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-    if (parseFloat(rate_20ft) <= 0 || parseFloat(rate_40ft) <= 0 ||
-        parseFloat(kilos_20ft) <= 0 || parseFloat(kilos_40ft) <= 0) {
-      return res.status(400).json({ message: 'All rates and kilos must be greater than 0' })
-    }
-
-    const insertData = {
-      country: country.trim(),
-      port_code: port_code.trim().toUpperCase(),
-      port_name: port_name.trim(),
-      rate_20ft: parseFloat(rate_20ft),
-      kilos_20ft: parseFloat(kilos_20ft),
-      freight_per_kilo_20ft: parseFloat(freight_per_kilo_20ft),
-      rate_40ft: parseFloat(rate_40ft),
-      kilos_40ft: parseFloat(kilos_40ft),
-      freight_per_kilo_40ft: parseFloat(freight_per_kilo_40ft),
-      date: date || new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    }
-
-    const { data: newRate, error } = await supabase
-      .from('sea_freight_rates')
-      .insert(insertData)
+// POST - Add new sea freight rate
+router.post("/", async (req, res) => {
+  try {
+    const payload = req.body;
+    const { data, error } = await supabase
+      .from("sea_freight_rates")
+      .insert({ ...payload, updated_at: new Date().toISOString() })
       .select()
-      .single()
+      .single();
 
-    if (error) throw error
+    if (error) throw error;
 
-    // Recalculate affected products
     const recalcResult = await recalculateSeaFreightProducts(
-      insertData.country,
-      insertData.port_code,
+      payload.country,
+      payload.port_code,
       {
-        freight_per_kilo_20ft: insertData.freight_per_kilo_20ft,
-        freight_per_kilo_40ft: insertData.freight_per_kilo_40ft
-      }
-    )
+        freight_per_kilo_20ft: payload.freight_per_kilo_20ft,
+        freight_per_kilo_40ft: payload.freight_per_kilo_40ft,
+      },
+    );
 
     res.status(201).json({
-      message: 'Sea freight rate added successfully',
-      data: newRate,
+      ...data,
       recalculation: {
         productsUpdated: recalcResult.updated,
-        errors: recalcResult.errors
-      }
-    })
+        errors: recalcResult.errors,
+      },
+    });
   } catch (err) {
-    console.error('Error adding sea freight rate:', err)
-    res.status(500).json({ message: 'Server error', error: err.message })
+    res.status(500).json({ error: err.message });
   }
-})
+});
 
-// PUT - Update existing sea freight rate and recalculate affected products
-router.put('/:id', async (req, res) => {
+// PUT - Update existing sea freight rate
+router.put("/:id", async (req, res) => {
   try {
-    const { id } = req.params
-    const {
-      country,
-      port_code,
-      port_name,
-      rate_20ft,
-      kilos_20ft,
-      freight_per_kilo_20ft,
-      rate_40ft,
-      kilos_40ft,
-      freight_per_kilo_40ft,
-      date
-    } = req.body
+    const { id } = req.params;
+    const payload = req.body;
 
-    if (!country || !port_code || !port_name ||
-        !rate_20ft || !kilos_20ft || !rate_40ft || !kilos_40ft) {
-      return res.status(400).json({
-        message: 'Country, port code, port name, and all container rates/kilos are required'
-      })
-    }
-
-    if (parseFloat(rate_20ft) <= 0 || parseFloat(rate_40ft) <= 0 ||
-        parseFloat(kilos_20ft) <= 0 || parseFloat(kilos_40ft) <= 0) {
-      return res.status(400).json({ message: 'All rates and kilos must be greater than 0' })
-    }
-
-    const updateData = {
-      country: country.trim(),
-      port_code: port_code.trim().toUpperCase(),
-      port_name: port_name.trim(),
-      rate_20ft: parseFloat(rate_20ft),
-      kilos_20ft: parseFloat(kilos_20ft),
-      freight_per_kilo_20ft: parseFloat(freight_per_kilo_20ft),
-      rate_40ft: parseFloat(rate_40ft),
-      kilos_40ft: parseFloat(kilos_40ft),
-      freight_per_kilo_40ft: parseFloat(freight_per_kilo_40ft),
-      date: date || new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    }
-
-    const { data: updatedRate, error } = await supabase
-      .from('sea_freight_rates')
-      .update(updateData)
-      .eq('id', id)
+    const { data, error } = await supabase
+      .from("sea_freight_rates")
+      .update({ ...payload, updated_at: new Date().toISOString() })
+      .eq("id", id)
       .select()
-      .single()
+      .single();
 
-    if (error) throw error
+    if (error) throw error;
 
-    // Recalculate affected products
     const recalcResult = await recalculateSeaFreightProducts(
-      updateData.country,
-      updateData.port_code,
+      payload.country,
+      payload.port_code,
       {
-        freight_per_kilo_20ft: updateData.freight_per_kilo_20ft,
-        freight_per_kilo_40ft: updateData.freight_per_kilo_40ft
-      }
-    )
+        freight_per_kilo_20ft: payload.freight_per_kilo_20ft,
+        freight_per_kilo_40ft: payload.freight_per_kilo_40ft,
+      },
+    );
 
     res.json({
-      message: 'Sea freight rate updated successfully',
-      data: updatedRate,
+      ...data,
       recalculation: {
         productsUpdated: recalcResult.updated,
-        errors: recalcResult.errors
-      }
-    })
+        errors: recalcResult.errors,
+      },
+    });
   } catch (err) {
-    console.error('Error updating sea freight rate:', err)
-    res.status(500).json({ message: 'Server error', error: err.message })
+    res.status(500).json({ error: err.message });
   }
-})
+});
 
-// DELETE - Remove sea freight rate
-router.delete('/:id', async (req, res) => {
+// DELETE - Delete sea freight rate
+router.delete("/:id", async (req, res) => {
   try {
-    const { id } = req.params
-
+    const { id } = req.params;
     const { error } = await supabase
-      .from('sea_freight_rates')
+      .from("sea_freight_rates")
       .delete()
-      .eq('id', id)
-
-    if (error) throw error
-
-    res.json({ message: 'Sea freight rate deleted successfully' })
+      .eq("id", id);
+    if (error) throw error;
+    res.json({ message: "Sea freight rate deleted successfully" });
   } catch (err) {
-    console.error('Error deleting sea freight rate:', err)
-    res.status(500).json({ message: 'Server error', error: err.message })
+    res.status(500).json({ error: err.message });
   }
-})
+});
 
-export default router
+// POST - Manual recalculation for a specific country + port
+router.post("/recalculate", async (req, res) => {
+  try {
+    const { country, port_code } = req.body;
+    if (!country || !port_code) {
+      return res
+        .status(400)
+        .json({ message: "country and port_code are required" });
+    }
+
+    const { data: latestRate, error: rateError } = await supabase
+      .from("sea_freight_rates")
+      .select("*")
+      .eq("country", country)
+      .eq("port_code", port_code)
+      .order("date", { ascending: false })
+      .limit(1)
+      .single();
+
+    if (rateError || !latestRate) {
+      return res.status(404).json({ message: "No sea freight rate found" });
+    }
+
+    const recalcResult = await recalculateSeaFreightProducts(
+      country,
+      port_code,
+      {
+        freight_per_kilo_20ft: latestRate.freight_per_kilo_20ft,
+        freight_per_kilo_40ft: latestRate.freight_per_kilo_40ft,
+      },
+    );
+
+    res.json({
+      message: "Recalculated successfully",
+      recalculation: recalcResult,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+export default router;

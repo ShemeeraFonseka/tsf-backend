@@ -1,308 +1,338 @@
-import express from 'express'
-import supabase from '../db.js'
+import express from "express";
+import supabase from "../db.js";
 
-const router = express.Router()
+const router = express.Router();
 
 // Helper function to get the applicable air freight rate by tier
 const getAirFreightRateByTier = (tier, rateData) => {
   if (!rateData || !tier) return 0;
   switch (tier) {
-    case 'gross+45kg':
+    case "gross+45kg":
       return parseFloat(rateData.rate_45kg);
-    case 'gross+100kg':
+    case "gross+100kg":
       return parseFloat(rateData.rate_100kg);
-    case 'gross+300kg':
+    case "gross+300kg":
       return parseFloat(rateData.rate_300kg);
-    case 'gross+500kg':
+    case "gross+500kg":
       return parseFloat(rateData.rate_500kg);
     default:
       return 0;
   }
-}
+};
 
 // Helper function to recalculate products affected by air freight rate change
-const recalculateAirFreightProducts = async (country, airportCode, newRateData) => {
+const recalculateAirFreightProducts = async (
+  country,
+  airportCode,
+  newRateData,
+) => {
   try {
-    console.log(`\n=== Starting Air Freight Recalculation ===`)
-    console.log(`Country: ${country}`)
-    console.log(`Airport Code: ${airportCode}`)
-    console.log(`New Rates:`, newRateData)
-    
+    console.log(`\n=== Starting Air Freight Recalculation ===`);
+    console.log(`Country: ${country}, Airport: ${airportCode}`);
+    console.log(`New Rates:`, newRateData);
+
     // Get current USD rate
     const { data: usdRateData, error: usdError } = await supabase
-      .from('usd_rates')
-      .select('rate')
-      .order('updated_at', { ascending: false })
+      .from("usd_rates")
+      .select("rate")
+      .order("updated_at", { ascending: false })
       .limit(1)
-      .single()
+      .single();
 
     if (usdError || !usdRateData) {
-      console.error('Could not fetch USD rate for recalculation:', usdError)
-      return { updated: 0, errors: 0, message: 'USD rate not found' }
+      console.error("Could not fetch USD rate:", usdError);
+      return { updated: 0, errors: 0, message: "USD rate not found" };
     }
 
-    const currentUsdRate = parseFloat(usdRateData.rate)
-    console.log(`Current USD Rate: ${currentUsdRate}`)
+    const currentUsdRate = parseFloat(usdRateData.rate);
+    console.log(`Current USD Rate: ${currentUsdRate}`);
 
-    // Find customers with matching country and airport code (case-insensitive)
+    // Find matching customers (case-insensitive)
     const { data: allCustomers, error: custError } = await supabase
-      .from('exportcustomers')
-      .select('cus_id, country, airport_code, cus_name')
+      .from("exportcustomersair")
+      .select("cus_id, country, airport_code, cus_name");
 
     if (custError) {
-      console.error('Error fetching customers:', custError)
-      return { updated: 0, errors: 0, message: 'Error fetching customers' }
+      console.error("Error fetching customers:", custError);
+      return { updated: 0, errors: 0, message: "Error fetching customers" };
     }
 
-    console.log(`\nTotal customers in database: ${allCustomers?.length || 0}`)
+    const customers = allCustomers.filter(
+      (c) =>
+        c.country?.toLowerCase().trim() === country.toLowerCase().trim() &&
+        c.airport_code?.toUpperCase().trim() ===
+          airportCode.toUpperCase().trim(),
+    );
 
-    // Filter customers with case-insensitive matching
-    const customers = allCustomers.filter(customer => 
-      customer.country && customer.airport_code &&
-      customer.country.toLowerCase().trim() === country.toLowerCase().trim() &&
-      customer.airport_code.toUpperCase().trim() === airportCode.toUpperCase().trim()
-    )
-
-    console.log(`Matching customers found: ${customers.length}`)
-    if (customers.length > 0) {
-      console.log('Matching customers:', customers.map(c => `${c.cus_name} (${c.country} - ${c.airport_code})`))
-    }
-
+    console.log(`Matching customers: ${customers.length}`);
     if (customers.length === 0) {
-      console.log(`No customers found for ${country} - ${airportCode}`)
-      return { updated: 0, errors: 0, message: 'No matching customers found' }
+      return { updated: 0, errors: 0, message: "No matching customers found" };
     }
 
-    const customerIds = customers.map(c => c.cus_id)
+    const customerIds = customers.map((c) => c.cus_id);
 
-    // Get all products for these customers with air freight
+    // Get all air freight products for these customers
     const { data: products, error: fetchError } = await supabase
-      .from('exportcustomer_product')
-      .select('*')
-      .in('cus_id', customerIds)
+      .from("exportcustomer_productair")
+      .select("*")
+      .in("cus_id", customerIds)
+      .eq("freight_type", "air");
 
     if (fetchError) {
-      console.error('Error fetching products:', fetchError)
-      throw fetchError
+      console.error("Error fetching products:", fetchError);
+      throw fetchError;
     }
 
-    console.log(`\nTotal products for these customers: ${products?.length || 0}`)
+    console.log(`Air freight products to update: ${products?.length || 0}`);
 
-    // Filter for air freight products
-    const airFreightProducts = products.filter(p => p.freight_type === 'air')
-    console.log(`Air freight products: ${airFreightProducts.length}`)
-
-    if (airFreightProducts.length === 0) {
-      console.log('No air freight products found for these customers')
-      return { updated: 0, errors: 0, message: 'No air freight products found' }
+    if (!products || products.length === 0) {
+      return {
+        updated: 0,
+        errors: 0,
+        message: "No air freight products found",
+      };
     }
 
-    let updated = 0
-    let errors = 0
+    let updated = 0;
+    let errors = 0;
 
-    // Recalculate each product
-    for (const product of airFreightProducts) {
+    for (const product of products) {
       try {
-        const multiplier = parseFloat(product.multiplier) || 0
-        const divisor = parseFloat(product.divisor) || 1
-        const gross_weight_tier = product.gross_weight_tier
+        const multiplier = parseFloat(product.multiplier) || 0;
+        const divisor = parseFloat(product.divisor) || 1;
 
-        console.log(`\nProcessing product ID ${product.id}:`)
-        console.log(`  - Weight Tier: ${gross_weight_tier}`)
-        console.log(`  - Multiplier: ${multiplier}`)
-        console.log(`  - Divisor: ${divisor}`)
-
-        if (!gross_weight_tier || multiplier === 0) {
-          console.log(`  ⚠️ Skipping - missing weight tier or multiplier`)
-          continue
+        if (multiplier === 0) {
+          console.log(`  ⚠️ Skipping product ${product.id} — multiplier is 0`);
+          continue;
         }
 
-        // Calculate new freight cost
-        const applicableRate = getAirFreightRateByTier(gross_weight_tier, newRateData)
-        const newFreightCost = (multiplier * applicableRate) / divisor
+        console.log(
+          `\nProcessing product ID ${product.id} (${product.common_name}):`,
+        );
+        console.log(`  multiplier=${multiplier}, divisor=${divisor}`);
 
-        console.log(`  - Applicable Rate: $${applicableRate}/kg`)
-        console.log(`  - New Freight Cost: $${newFreightCost.toFixed(2)}`)
+        // Recalculate all 4 freight cost tiers
+        const freight_cost_45kg =
+          (multiplier * parseFloat(newRateData.rate_45kg)) / divisor;
+        const freight_cost_100kg =
+          (multiplier * parseFloat(newRateData.rate_100kg)) / divisor;
+        const freight_cost_300kg =
+          (multiplier * parseFloat(newRateData.rate_300kg)) / divisor;
+        const freight_cost_500kg =
+          (multiplier * parseFloat(newRateData.rate_500kg)) / divisor;
 
-        // Get cost values (stored in USD)
-        const export_doc = parseFloat(product.export_doc) || 0
-        const transport_cost = parseFloat(product.transport_cost) || 0
-        const loading_cost = parseFloat(product.loading_cost) || 0
-        const airway_cost = parseFloat(product.airway_cost) || 0
-        const forwardHandling_cost = parseFloat(product.forwardHandling_cost) || 0
-        const exfactoryprice = parseFloat(product.exfactoryprice) || 0
+        // Recalculate FOB in LKR
+        const exfactoryprice = parseFloat(product.exfactoryprice) || 0;
+        const export_doc = parseFloat(product.export_doc) || 0;
+        const transport_cost = parseFloat(product.transport_cost) || 0;
+        const loading_cost = parseFloat(product.loading_cost) || 0;
+        const airway_cost = parseFloat(product.airway_cost) || 0;
+        const forwardHandling = parseFloat(product.forwardHandling_cost) || 0;
 
-        // Calculate total costs in USD
-        const totalCostsUSD = export_doc + transport_cost + loading_cost + airway_cost + forwardHandling_cost
+        const totalCostsUSD =
+          export_doc +
+          transport_cost +
+          loading_cost +
+          airway_cost +
+          forwardHandling;
+        const fobLKR = exfactoryprice + totalCostsUSD * currentUsdRate;
+        const fobUSD = fobLKR / currentUsdRate;
 
-        // Convert total costs to LKR
-        const totalCostsLKR = totalCostsUSD * currentUsdRate
+        // Recalculate all 4 CNF tiers
+        const cnf_45kg = fobUSD + freight_cost_45kg;
+        const cnf_100kg = fobUSD + freight_cost_100kg;
+        const cnf_300kg = fobUSD + freight_cost_300kg;
+        const cnf_500kg = fobUSD + freight_cost_500kg;
 
-        // Calculate new FOB in LKR
-        const newFobPrice = exfactoryprice + totalCostsLKR
+        console.log(
+          `  FOB LKR: ${fobLKR.toFixed(2)}, FOB USD: ${fobUSD.toFixed(2)}`,
+        );
+        console.log(
+          `  Freight: 45kg=$${freight_cost_45kg.toFixed(2)}, 100kg=$${freight_cost_100kg.toFixed(2)}, 300kg=$${freight_cost_300kg.toFixed(2)}, 500kg=$${freight_cost_500kg.toFixed(2)}`,
+        );
+        console.log(
+          `  CNF:     45kg=$${cnf_45kg.toFixed(2)}, 100kg=$${cnf_100kg.toFixed(2)}, 300kg=$${cnf_300kg.toFixed(2)}, 500kg=$${cnf_500kg.toFixed(2)}`,
+        );
 
-        // Calculate new CNF in USD (FOB in USD + Freight)
-        const fobInUSD = newFobPrice / currentUsdRate
-        const newCnf = fobInUSD + newFreightCost
-
-        console.log(`  - Old FOB: Rs.${product.fob_price}`)
-        console.log(`  - New FOB: Rs.${newFobPrice.toFixed(2)}`)
-        console.log(`  - New CNF: $${newCnf.toFixed(2)}`)
-
-        // Update the product
         const { error: updateError } = await supabase
-          .from('exportcustomer_product')
+          .from("exportcustomer_productair")
           .update({
-            freight_cost: parseFloat(newFreightCost.toFixed(2)),
-            fob_price: parseFloat(newFobPrice.toFixed(2)),
-            cnf: parseFloat(newCnf.toFixed(2))
+            fob_price: parseFloat(fobLKR.toFixed(2)),
+            freight_cost_45kg: parseFloat(freight_cost_45kg.toFixed(2)),
+            freight_cost_100kg: parseFloat(freight_cost_100kg.toFixed(2)),
+            freight_cost_300kg: parseFloat(freight_cost_300kg.toFixed(2)),
+            freight_cost_500kg: parseFloat(freight_cost_500kg.toFixed(2)),
+            cnf_45kg: parseFloat(cnf_45kg.toFixed(2)),
+            cnf_100kg: parseFloat(cnf_100kg.toFixed(2)),
+            cnf_300kg: parseFloat(cnf_300kg.toFixed(2)),
+            cnf_500kg: parseFloat(cnf_500kg.toFixed(2)),
           })
-          .eq('id', product.id)
+          .eq("id", product.id);
 
         if (updateError) {
-          console.error(`  ❌ Error updating product ${product.id}:`, updateError)
-          errors++
+          console.error(
+            `  ❌ Error updating product ${product.id}:`,
+            updateError,
+          );
+          errors++;
         } else {
-          console.log(`  ✅ Successfully updated`)
-          updated++
+          console.log(`  ✅ Updated`);
+          updated++;
         }
       } catch (err) {
-        console.error(`  ❌ Error processing product ${product.id}:`, err)
-        errors++
+        console.error(`  ❌ Error processing product ${product.id}:`, err);
+        errors++;
       }
     }
 
-    console.log(`\n=== Recalculation Complete ===`)
-    console.log(`Updated: ${updated}`)
-    console.log(`Errors: ${errors}`)
-    console.log(`============================\n`)
-
-    return { updated, errors }
+    console.log(`\n=== Done: ${updated} updated, ${errors} errors ===\n`);
+    return { updated, errors };
   } catch (err) {
-    console.error('Error in recalculateAirFreightProducts:', err)
-    throw err
+    console.error("Error in recalculateAirFreightProducts:", err);
+    throw err;
   }
-}
+};
 
 // GET all freight rates (sorted by most recent)
-router.get('/', async (req, res) => {
+router.get("/", async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit) || 100
+    const limit = parseInt(req.query.limit) || 100;
 
     const { data: rates, error } = await supabase
-      .from('freight_rates')
-      .select('*')
-      .order('updated_at', { ascending: false })
-      .limit(limit)
+      .from("freight_rates")
+      .select("*")
+      .order("updated_at", { ascending: false })
+      .limit(limit);
 
-    if (error) throw error
+    if (error) throw error;
 
-    res.json(rates)
+    res.json(rates);
   } catch (err) {
-    console.error('Error fetching freight rates:', err)
-    res.status(500).json({ message: 'Server error', error: err.message })
+    console.error("Error fetching freight rates:", err);
+    res.status(500).json({ message: "Server error", error: err.message });
   }
-})
+});
 
 // GET freight rates for a specific country
-router.get('/country/:country', async (req, res) => {
+router.get("/country/:country", async (req, res) => {
   try {
-    const { country } = req.params
+    const { country } = req.params;
 
     const { data: rates, error } = await supabase
-      .from('freight_rates')
-      .select('*')
-      .eq('country', country)
-      .order('updated_at', { ascending: false })
+      .from("freight_rates")
+      .select("*")
+      .eq("country", country)
+      .order("updated_at", { ascending: false });
 
-    if (error) throw error
+    if (error) throw error;
 
-    res.json(rates)
+    res.json(rates);
   } catch (err) {
-    console.error('Error fetching freight rates by country:', err)
-    res.status(500).json({ message: 'Server error', error: err.message })
+    console.error("Error fetching freight rates by country:", err);
+    res.status(500).json({ message: "Server error", error: err.message });
   }
-})
+});
 
 // GET latest rate for a specific country and airport
-router.get('/country/:country/airport/:airport_code/latest', async (req, res) => {
-  try {
-    const { country, airport_code } = req.params
+router.get(
+  "/country/:country/airport/:airport_code/latest",
+  async (req, res) => {
+    try {
+      const { country, airport_code } = req.params;
 
-    const { data: rate, error } = await supabase
-      .from('freight_rates')
-      .select('*')
-      .eq('country', country)
-      .eq('airport_code', airport_code.toUpperCase())
-      .order('updated_at', { ascending: false })
-      .limit(1)
-      .single()
+      const { data: rate, error } = await supabase
+        .from("freight_rates")
+        .select("*")
+        .eq("country", country)
+        .eq("airport_code", airport_code.toUpperCase())
+        .order("updated_at", { ascending: false })
+        .limit(1)
+        .single();
 
-    if (error) {
-      if (error.code === 'PGRST116') {
-        return res.status(404).json({ message: 'No rate found for this country and airport' })
+      if (error) {
+        if (error.code === "PGRST116") {
+          return res
+            .status(404)
+            .json({ message: "No rate found for this country and airport" });
+        }
+        throw error;
       }
-      throw error
-    }
 
-    res.json(rate)
-  } catch (err) {
-    console.error('Error fetching latest rate by country and airport:', err)
-    res.status(500).json({ message: 'Server error', error: err.message })
-  }
-})
+      res.json(rate);
+    } catch (err) {
+      console.error("Error fetching latest rate by country and airport:", err);
+      res.status(500).json({ message: "Server error", error: err.message });
+    }
+  },
+);
 
 // GET latest rate for a specific country (any airport)
-router.get('/country/:country/latest', async (req, res) => {
+router.get("/country/:country/latest", async (req, res) => {
   try {
-    const { country } = req.params
+    const { country } = req.params;
 
     const { data: rate, error } = await supabase
-      .from('freight_rates')
-      .select('*')
-      .eq('country', country)
-      .order('updated_at', { ascending: false })
+      .from("freight_rates")
+      .select("*")
+      .eq("country", country)
+      .order("updated_at", { ascending: false })
       .limit(1)
-      .single()
+      .single();
 
     if (error) {
-      if (error.code === 'PGRST116') {
-        return res.status(404).json({ message: 'No rate found for this country' })
+      if (error.code === "PGRST116") {
+        return res
+          .status(404)
+          .json({ message: "No rate found for this country" });
       }
-      throw error
+      throw error;
     }
 
-    res.json(rate)
+    res.json(rate);
   } catch (err) {
-    console.error('Error fetching latest rate by country:', err)
-    res.status(500).json({ message: 'Server error', error: err.message })
+    console.error("Error fetching latest rate by country:", err);
+    res.status(500).json({ message: "Server error", error: err.message });
   }
-})
+});
 
 // POST - Create new freight rate and recalculate affected products
-router.post('/', async (req, res) => {
+router.post("/", async (req, res) => {
   try {
-    const { 
-      country, 
-      airport_code, 
-      airport_name, 
-      rate_45kg, 
-      rate_100kg, 
-      rate_300kg, 
-      rate_500kg, 
-      date 
-    } = req.body
+    const {
+      country,
+      airport_code,
+      airport_name,
+      rate_45kg,
+      rate_100kg,
+      rate_300kg,
+      rate_500kg,
+      date,
+    } = req.body;
 
-    if (!country || !airport_code || !airport_name || 
-        !rate_45kg || !rate_100kg || !rate_300kg || !rate_500kg) {
-      return res.status(400).json({ 
-        message: 'Country, airport code, airport name, and all weight tier rates are required' 
-      })
+    if (
+      !country ||
+      !airport_code ||
+      !airport_name ||
+      !rate_45kg ||
+      !rate_100kg ||
+      !rate_300kg ||
+      !rate_500kg
+    ) {
+      return res.status(400).json({
+        message:
+          "Country, airport code, airport name, and all weight tier rates are required",
+      });
     }
 
-    if (parseFloat(rate_45kg) <= 0 || parseFloat(rate_100kg) <= 0 || 
-        parseFloat(rate_300kg) <= 0 || parseFloat(rate_500kg) <= 0) {
-      return res.status(400).json({ message: 'All rates must be greater than 0' })
+    if (
+      parseFloat(rate_45kg) <= 0 ||
+      parseFloat(rate_100kg) <= 0 ||
+      parseFloat(rate_300kg) <= 0 ||
+      parseFloat(rate_500kg) <= 0
+    ) {
+      return res
+        .status(400)
+        .json({ message: "All rates must be greater than 0" });
     }
 
     const insertData = {
@@ -314,18 +344,18 @@ router.post('/', async (req, res) => {
       rate_300kg: parseFloat(rate_300kg),
       rate_500kg: parseFloat(rate_500kg),
       date: date || new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    }
+      updated_at: new Date().toISOString(),
+    };
 
     const { data: newRate, error } = await supabase
-      .from('freight_rates')
+      .from("freight_rates")
       .insert(insertData)
       .select()
-      .single()
+      .single();
 
     if (error) {
-      console.error('Supabase insert error:', error)
-      throw error
+      console.error("Supabase insert error:", error);
+      throw error;
     }
 
     // Recalculate affected products
@@ -336,49 +366,63 @@ router.post('/', async (req, res) => {
         rate_45kg: insertData.rate_45kg,
         rate_100kg: insertData.rate_100kg,
         rate_300kg: insertData.rate_300kg,
-        rate_500kg: insertData.rate_500kg
-      }
-    )
+        rate_500kg: insertData.rate_500kg,
+      },
+    );
 
     res.status(201).json({
-      message: 'Freight rate added successfully',
+      message: "Freight rate added successfully",
       data: newRate,
       recalculation: {
         productsUpdated: recalcResult.updated,
-        errors: recalcResult.errors
-      }
-    })
+        errors: recalcResult.errors,
+      },
+    });
   } catch (err) {
-    console.error('Error adding freight rate:', err)
-    res.status(500).json({ message: 'Server error', error: err.message })
+    console.error("Error adding freight rate:", err);
+    res.status(500).json({ message: "Server error", error: err.message });
   }
-})
+});
 
 // PUT - Update existing freight rate and recalculate affected products
-router.put('/:id', async (req, res) => {
+router.put("/:id", async (req, res) => {
   try {
-    const { id } = req.params
-    const { 
-      country, 
-      airport_code, 
-      airport_name, 
-      rate_45kg, 
-      rate_100kg, 
-      rate_300kg, 
-      rate_500kg, 
-      date 
-    } = req.body
+    const { id } = req.params;
+    const {
+      country,
+      airport_code,
+      airport_name,
+      rate_45kg,
+      rate_100kg,
+      rate_300kg,
+      rate_500kg,
+      date,
+    } = req.body;
 
-    if (!country || !airport_code || !airport_name || 
-        !rate_45kg || !rate_100kg || !rate_300kg || !rate_500kg) {
-      return res.status(400).json({ 
-        message: 'Country, airport code, airport name, and all weight tier rates are required' 
-      })
+    if (
+      !country ||
+      !airport_code ||
+      !airport_name ||
+      !rate_45kg ||
+      !rate_100kg ||
+      !rate_300kg ||
+      !rate_500kg
+    ) {
+      return res.status(400).json({
+        message:
+          "Country, airport code, airport name, and all weight tier rates are required",
+      });
     }
 
-    if (parseFloat(rate_45kg) <= 0 || parseFloat(rate_100kg) <= 0 || 
-        parseFloat(rate_300kg) <= 0 || parseFloat(rate_500kg) <= 0) {
-      return res.status(400).json({ message: 'All rates must be greater than 0' })
+    if (
+      parseFloat(rate_45kg) <= 0 ||
+      parseFloat(rate_100kg) <= 0 ||
+      parseFloat(rate_300kg) <= 0 ||
+      parseFloat(rate_500kg) <= 0
+    ) {
+      return res
+        .status(400)
+        .json({ message: "All rates must be greater than 0" });
     }
 
     const updateData = {
@@ -390,19 +434,19 @@ router.put('/:id', async (req, res) => {
       rate_300kg: parseFloat(rate_300kg),
       rate_500kg: parseFloat(rate_500kg),
       date: date || new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    }
+      updated_at: new Date().toISOString(),
+    };
 
     const { data: updatedRate, error } = await supabase
-      .from('freight_rates')
+      .from("freight_rates")
       .update(updateData)
-      .eq('id', id)
+      .eq("id", id)
       .select()
-      .single()
+      .single();
 
     if (error) {
-      console.error('Supabase update error:', error)
-      throw error
+      console.error("Supabase update error:", error);
+      throw error;
     }
 
     // Recalculate affected products
@@ -413,108 +457,121 @@ router.put('/:id', async (req, res) => {
         rate_45kg: updateData.rate_45kg,
         rate_100kg: updateData.rate_100kg,
         rate_300kg: updateData.rate_300kg,
-        rate_500kg: updateData.rate_500kg
-      }
-    )
+        rate_500kg: updateData.rate_500kg,
+      },
+    );
 
     res.json({
-      message: 'Freight rate updated successfully',
+      message: "Freight rate updated successfully",
       data: updatedRate,
       recalculation: {
         productsUpdated: recalcResult.updated,
-        errors: recalcResult.errors
-      }
-    })
+        errors: recalcResult.errors,
+      },
+    });
   } catch (err) {
-    console.error('Error updating freight rate:', err)
-    res.status(500).json({ message: 'Server error', error: err.message })
+    console.error("Error updating freight rate:", err);
+    res.status(500).json({ message: "Server error", error: err.message });
   }
-})
+});
 
 // DELETE - Remove freight rate
-router.delete('/:id', async (req, res) => {
+router.delete("/:id", async (req, res) => {
   try {
-    const { id } = req.params
+    const { id } = req.params;
 
     const { error } = await supabase
-      .from('freight_rates')
+      .from("freight_rates")
       .delete()
-      .eq('id', id)
+      .eq("id", id);
 
-    if (error) throw error
+    if (error) throw error;
 
-    res.json({ message: 'Freight rate deleted successfully' })
+    res.json({ message: "Freight rate deleted successfully" });
   } catch (err) {
-    console.error('Error deleting freight rate:', err)
-    res.status(500).json({ message: 'Server error', error: err.message })
+    console.error("Error deleting freight rate:", err);
+    res.status(500).json({ message: "Server error", error: err.message });
   }
-})
+});
 
 // GET rate for specific date, country, and airport
-router.get('/date/:date/country/:country/airport/:airport_code', async (req, res) => {
-  try {
-    const { date, country, airport_code } = req.params
-    const searchDate = new Date(date)
-    
-    const startOfDay = new Date(searchDate.setHours(0, 0, 0, 0)).toISOString()
-    const endOfDay = new Date(searchDate.setHours(23, 59, 59, 999)).toISOString()
+router.get(
+  "/date/:date/country/:country/airport/:airport_code",
+  async (req, res) => {
+    try {
+      const { date, country, airport_code } = req.params;
+      const searchDate = new Date(date);
 
-    const { data: rate, error } = await supabase
-      .from('freight_rates')
-      .select('*')
-      .eq('country', country)
-      .eq('airport_code', airport_code.toUpperCase())
-      .gte('date', startOfDay)
-      .lte('date', endOfDay)
-      .order('updated_at', { ascending: false })
-      .limit(1)
-      .single()
+      const startOfDay = new Date(
+        searchDate.setHours(0, 0, 0, 0),
+      ).toISOString();
+      const endOfDay = new Date(
+        searchDate.setHours(23, 59, 59, 999),
+      ).toISOString();
 
-    if (error) {
-      if (error.code === 'PGRST116') {
-        return res.status(404).json({ message: 'No rate found for this date, country, and airport' })
+      const { data: rate, error } = await supabase
+        .from("freight_rates")
+        .select("*")
+        .eq("country", country)
+        .eq("airport_code", airport_code.toUpperCase())
+        .gte("date", startOfDay)
+        .lte("date", endOfDay)
+        .order("updated_at", { ascending: false })
+        .limit(1)
+        .single();
+
+      if (error) {
+        if (error.code === "PGRST116") {
+          return res.status(404).json({
+            message: "No rate found for this date, country, and airport",
+          });
+        }
+        throw error;
       }
-      throw error
-    }
 
-    res.json(rate)
-  } catch (err) {
-    console.error('Error fetching rate by date, country, and airport:', err)
-    res.status(500).json({ message: 'Server error', error: err.message })
-  }
-})
+      res.json(rate);
+    } catch (err) {
+      console.error("Error fetching rate by date, country, and airport:", err);
+      res.status(500).json({ message: "Server error", error: err.message });
+    }
+  },
+);
 
 // GET rate for specific date and country (legacy - any airport)
-router.get('/date/:date/country/:country', async (req, res) => {
+router.get("/date/:date/country/:country", async (req, res) => {
   try {
-    const { date, country } = req.params
-    const searchDate = new Date(date)
-    
-    const startOfDay = new Date(searchDate.setHours(0, 0, 0, 0)).toISOString()
-    const endOfDay = new Date(searchDate.setHours(23, 59, 59, 999)).toISOString()
+    const { date, country } = req.params;
+    const searchDate = new Date(date);
+
+    const startOfDay = new Date(searchDate.setHours(0, 0, 0, 0)).toISOString();
+    const endOfDay = new Date(
+      searchDate.setHours(23, 59, 59, 999),
+    ).toISOString();
 
     const { data: rate, error } = await supabase
-      .from('freight_rates')
-      .select('*')
-      .eq('country', country)
-      .gte('date', startOfDay)
-      .lte('date', endOfDay)
-      .order('updated_at', { ascending: false })
+      .from("freight_rates")
+      .select("*")
+      .eq("country", country)
+      .gte("date", startOfDay)
+      .lte("date", endOfDay)
+      .order("updated_at", { ascending: false })
       .limit(1)
-      .single()
+      .single();
 
     if (error) {
-      if (error.code === 'PGRST116') {
-        return res.status(404).json({ message: 'No rate found for this date and country' })
+      if (error.code === "PGRST116") {
+        return res
+          .status(404)
+          .json({ message: "No rate found for this date and country" });
       }
-      throw error
+      throw error;
     }
 
-    res.json(rate)
+    res.json(rate);
   } catch (err) {
-    console.error('Error fetching rate by date and country:', err)
-    res.status(500).json({ message: 'Server error', error: err.message })
+    console.error("Error fetching rate by date and country:", err);
+    res.status(500).json({ message: "Server error", error: err.message });
   }
-})
+});
 
-export default router
+export default router;

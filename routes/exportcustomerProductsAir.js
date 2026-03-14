@@ -3,27 +3,45 @@ import supabase from "../db.js";
 
 const router = express.Router();
 
-// Get price list for a customer — joins products table to get image_url
+// Get price list for a customer
 router.get("/:cus_id", async (req, res) => {
   try {
     const { cus_id } = req.params;
 
     const { data, error } = await supabase
-      .from("customer_product")
+      .from("exportcustomer_productair")
       .select(
         `
         id,
         common_name,
         scientific_name,
+        image_url,
         category,
         size_range,
         purchasing_price,
-        margin,
-        margin_percentage,
-        selling_price,
+        exfactoryprice,
+        export_doc,
+        transport_cost,
+        loading_cost,
+        airway_cost,
+        forwardHandling_cost,
+        multiplier,
+        divisor,
+        freight_type,
+        fob_price,
         product_id,
-        variant_id,
-        image_url
+        freight_cost_45kg,
+        freight_cost_100kg,
+        freight_cost_300kg,
+        freight_cost_500kg,
+        cnf_45kg,
+        cnf_100kg,
+        cnf_300kg,
+        cnf_500kg,
+        freight_cost_20ft,
+        cnf_20ft,
+        freight_cost_40ft,
+        cnf_40ft
       `,
       )
       .eq("cus_id", cus_id)
@@ -43,7 +61,7 @@ router.post("/", async (req, res) => {
     const payload = req.body;
 
     const { data, error } = await supabase
-      .from("customer_product")
+      .from("exportcustomer_productair")
       .insert(payload)
       .select()
       .single();
@@ -63,7 +81,7 @@ router.put("/:id", async (req, res) => {
     const payload = req.body;
 
     const { data, error } = await supabase
-      .from("customer_product")
+      .from("exportcustomer_productair")
       .update(payload)
       .eq("id", id)
       .select()
@@ -83,7 +101,7 @@ router.delete("/:id", async (req, res) => {
     const { id } = req.params;
 
     const { error } = await supabase
-      .from("customer_product")
+      .from("exportcustomer_productair")
       .delete()
       .eq("id", id);
 

@@ -520,19 +520,15 @@ async function updateExportCustomerPricesForVariant(
     }
 
     // Get current USD rate once
-    const { data: usdRateData, error: usdRateError } = await supabase
-      .from("usd_rate")
+    const { data: usdRateData } = await supabase
+      .from("usd_rates")
       .select("rate")
       .order("date", { ascending: false })
       .limit(1)
       .single();
 
-    if (usdRateError) {
-      console.error("Error fetching USD rate:", usdRateError);
-    }
-
-    const usdRate = parseFloat(usdRateData?.rate) || 300;
-    console.log(`Using USD rate: ${usdRate}`);
+    const usdRate = parseFloat(usdRateData?.rate) || 304;
+    console.log(`[recalculate] using usd_rate table: ${usdRate}`);
 
     for (const cp of customerPrices) {
       // Log the customer price details for debugging
@@ -553,20 +549,12 @@ async function updateExportCustomerPricesForVariant(
         (parseFloat(cp.airway_cost) || 0) +
         (parseFloat(cp.forwardHandling_cost) || 0);
 
-      const newFobLKR = newExFactoryPrice + totalAdditionalUSD * usdRate;
-      const fobInUSD = newFobLKR / usdRate;
+      const fobInUSD = newExFactoryPrice / usdRate + totalAdditionalUSD;
 
-      console.log(`Customer ${cp.id} calculations:`, {
-        totalAdditionalUSD,
-        newFobLKR,
-        fobInUSD,
-      });
-
-      // Base update data with common fields
       const updateData = {
         purchasing_price: newPurchasePrice,
         exfactoryprice: newExFactoryPrice,
-        fob_price: newFobLKR,
+        fob_price: fobInUSD, // ← now USD
       };
 
       // Handle freight calculations based on type
@@ -584,9 +572,9 @@ async function updateExportCustomerPricesForVariant(
 
         // Fetch the customer's air freight rate
         const { data: customerData } = await supabase
-          .from("exportcustomerlistair")
+          .from("exportcustomersair")
           .select("country, airport_code")
-          .eq("id", cp.cus_id)
+          .eq("cus_id", cp.cus_id)
           .single();
 
         if (customerData) {
@@ -612,7 +600,7 @@ async function updateExportCustomerPricesForVariant(
           const { data: airRates } = await airRateQuery;
           const airRate = airRates?.[0];
 
-          if (airRate && m > 0) {
+          if (airRate) {
             // Recalculate all freight costs + CNF from scratch
             const fc45 = (m * parseFloat(airRate.rate_45kg)) / d;
             const fc100 = (m * parseFloat(airRate.rate_100kg)) / d;
@@ -636,13 +624,6 @@ async function updateExportCustomerPricesForVariant(
             updateData.cnf_100kg = fobInUSD + fc100;
             updateData.cnf_300kg = fobInUSD + fc300;
             updateData.cnf_500kg = fobInUSD + fc500;
-
-            console.log(`CNF calculated with new freight:`, {
-              cnf45: updateData.cnf_45kg,
-              cnf100: updateData.cnf_100kg,
-              cnf300: updateData.cnf_300kg,
-              cnf500: updateData.cnf_500kg,
-            });
           } else {
             // Use existing freight costs, just update CNF with new FOB
             console.log(`Using existing freight costs:`, {
@@ -762,7 +743,7 @@ async function updateExportCustomerPricesForVariant(
           );
         } else {
           console.log(
-            `✅ Successfully updated customer price row ${cp.id} — new FOB: ${newFobLKR.toFixed(2)} LKR / ${fobInUSD.toFixed(4)} USD`,
+            `✅ Successfully updated customer price row ${cp.id} — new FOB: ${fobInUSD.toFixed(4)} USD`,
           );
 
           // Log the CNF values that were updated

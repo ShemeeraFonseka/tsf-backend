@@ -100,4 +100,71 @@ router.post("/reset-password", async (req, res) => {
   res.json({ message: "Password reset successfully" });
 });
 
+// ── Add these routes to your existing auth.js router ──
+// Place them BEFORE the export default router line
+
+// GET all users (for user management page)
+router.get("/users", async (req, res) => {
+  const { data, error } = await supabase
+    .from("users")
+    .select("id, name, email, position, created_at")
+    .order("created_at", { ascending: false });
+
+  if (error) return res.status(500).json({ message: "Failed to fetch users" });
+  res.json(data);
+});
+
+// PUT - Update user (name, email, position, optional new password)
+router.put("/users/:id", async (req, res) => {
+  const { id } = req.params;
+  const { name, email, position, password } = req.body;
+
+  if (!name || !email || !position)
+    return res
+      .status(400)
+      .json({ message: "Name, email and position are required" });
+
+  const updatePayload = { name, email, position };
+
+  if (password) {
+    if (password.length < 6)
+      return res
+        .status(400)
+        .json({ message: "Password must be at least 6 characters" });
+    updatePayload.password = await bcrypt.hash(password, 10);
+  }
+
+  const { error } = await supabase
+    .from("users")
+    .update(updatePayload)
+    .eq("id", id);
+
+  if (error) return res.status(500).json({ message: "Failed to update user" });
+  res.json({ message: "User updated successfully" });
+});
+
+// DELETE - Remove user
+router.delete("/users/:id", async (req, res) => {
+  const { id } = req.params;
+
+  const { error } = await supabase.from("users").delete().eq("id", id);
+
+  if (error) return res.status(500).json({ message: "Failed to delete user" });
+  res.json({ message: "User deleted successfully" });
+});
+
+// GET single user by ID
+router.get("/users/:id", async (req, res) => {
+  const { id } = req.params;
+
+  const { data, error } = await supabase
+    .from("users")
+    .select("id, name, email, position, created_at")
+    .eq("id", id)
+    .single();
+
+  if (error) return res.status(404).json({ message: "User not found" });
+  res.json(data);
+});
+
 export default router;

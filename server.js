@@ -75,6 +75,12 @@ app.use("/api/sea-freight-rates", seafreightrateRouter);
 // Serve uploaded images
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
+import customerAuthRouter from "./routes/customerAuth.js";
+app.use("/api/customer-auth", customerAuthRouter);
+
+import ordersRouter from "./routes/orders.js";
+app.use("/api/orders", ordersRouter);
+
 // For local development
 if (process.env.NODE_ENV !== "production") {
   const port = process.env.PORT || 5000;

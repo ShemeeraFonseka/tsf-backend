@@ -80,11 +80,9 @@ router.post("/login", async (req, res) => {
       .json({ message: "No account found with that email" });
 
   if (!customer.is_active)
-    return res
-      .status(403)
-      .json({
-        message: "Your account has been deactivated. Please contact us.",
-      });
+    return res.status(403).json({
+      message: "Your account has been deactivated. Please contact us.",
+    });
 
   const valid = await bcrypt.compare(password, customer.password);
   if (!valid) return res.status(401).json({ message: "Incorrect password" });

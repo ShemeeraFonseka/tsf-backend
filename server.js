@@ -75,7 +75,7 @@ app.use("/api/sea-freight-rates", seafreightrateRouter);
 // Serve uploaded images
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-import customerAuthRouter from "./routes/customerAuth.js";
+import customerAuthRouter from "./routes/customerauth.js";
 app.use("/api/customer-auth", customerAuthRouter);
 
 import ordersRouter from "./routes/orders.js";

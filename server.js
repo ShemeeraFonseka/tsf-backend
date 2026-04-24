@@ -36,9 +36,6 @@ app.get("/", (req, res) => {
 import authRoutes from "./routes/auth.js";
 app.use("/api/auth", authRoutes);
 
-import productlistRouter from "./routes/productlist.js";
-app.use("/api/productlist", productlistRouter);
-
 import customerlistRouter from "./routes/customerlist.js";
 app.use("/api/customerlist", customerlistRouter);
 
@@ -47,9 +44,6 @@ app.use("/api/customer-products", customerProductsRouter);
 
 import exportproductlistRouter from "./routes/exportproductlist.js";
 app.use("/api/exportproductlist", exportproductlistRouter);
-
-import exportproductlistairRouter from "./routes/exportproductlistair.js";
-app.use("/api/exportproductlistair", exportproductlistairRouter);
 
 import exportcustomerlistRouter from "./routes/exportcustomerlist.js";
 app.use("/api/exportcustomerlist", exportcustomerlistRouter);
@@ -80,6 +74,12 @@ app.use("/api/customer-auth", customerAuthRouter);
 
 import ordersRouter from "./routes/orders.js";
 app.use("/api/orders", ordersRouter);
+
+import invoicesRouter from "./routes/invoices.js";
+app.use("/api/invoices", invoicesRouter);
+
+import productlistRouter from "./routes/productlist_unified.js";
+app.use("/api/productlist", productlistRouter);
 
 // For local development
 if (process.env.NODE_ENV !== "production") {

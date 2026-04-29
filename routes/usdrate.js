@@ -4,223 +4,261 @@ import supabase from "../db.js";
 const router = express.Router();
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HELPER 1: Update usdrate field on every variant in exportproducts (air + sea)
-//           and recalculate exfactoryprice using the new rate
+// HELPER 1: Update usdrate + recalculate exfactoryprice on all variants
+//           in the unified "products" table (export_sea and export_air types)
 // ─────────────────────────────────────────────────────────────────────────────
 const updateVariantUsdRates = async (newUsdRate) => {
   console.log(
     `[Variant USD Update] Updating all variants to rate: ${newUsdRate}`,
   );
 
-  const tables = ["exportproducts", "exportproductsair"];
-  let totalUpdated = 0;
-  let totalErrors = 0;
-
-  for (const table of tables) {
-    try {
-      const { data: products, error: fetchError } = await supabase
-        .from(table)
-        .select("id, variants");
-
-      if (fetchError) {
-        console.error(
-          `[Variant USD Update] Fetch error from ${table}:`,
-          fetchError,
-        );
-        totalErrors++;
-        continue;
-      }
-
-      if (!products || products.length === 0) continue;
-
-      for (const product of products) {
-        if (
-          !product.variants ||
-          !Array.isArray(product.variants) ||
-          product.variants.length === 0
-        )
-          continue;
-
-        try {
-          const updatedVariants = product.variants.map((variant) => {
-            const purchasePrice = parseFloat(variant.purchasing_price) || 0;
-            const jcFobUSD = parseFloat(variant.jc_fob) || 0;
-            const packingCostUSD = parseFloat(variant.packing_cost) || 0;
-            const labourUSD = parseFloat(variant.labour_overhead) || 0;
-            const profitUSD = parseFloat(variant.profit) || 0;
-
-            // base: use purchasing_price if > 0, otherwise jc_fob × new rate
-            const base =
-              purchasePrice > 0 ? purchasePrice : jcFobUSD * newUsdRate;
-
-            const newExFactory = parseFloat(
-              (
-                base +
-                (packingCostUSD + labourUSD + profitUSD) * newUsdRate
-              ).toFixed(2),
-            );
-
-            return {
-              ...variant,
-              usdrate: newUsdRate,
-              exfactoryprice: newExFactory,
-            };
-          });
-
-          const { error: updateError } = await supabase
-            .from(table)
-            .update({ variants: updatedVariants })
-            .eq("id", product.id);
-
-          if (updateError) {
-            console.error(
-              `[Variant USD Update] Error on ${table} product ${product.id}:`,
-              updateError,
-            );
-            totalErrors++;
-          } else {
-            totalUpdated++;
-          }
-        } catch (err) {
-          console.error(
-            `[Variant USD Update] Exception on ${table} product ${product.id}:`,
-            err,
-          );
-          totalErrors++;
-        }
-      }
-    } catch (err) {
-      console.error(`[Variant USD Update] Fatal error on table ${table}:`, err);
-      totalErrors++;
-    }
-  }
-
-  console.log(
-    `[Variant USD Update] Done — ${totalUpdated} products updated, ${totalErrors} errors`,
-  );
-  return { totalUpdated, totalErrors };
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// HELPER 2: Recalculate FOB + CNF in exportcustomer_product with new USD rate
-// ─────────────────────────────────────────────────────────────────────────────
-const recalculateCustomerPrices = async (newUsdRate) => {
-  console.log(`[Customer Price Recalc] Starting with USD rate: ${newUsdRate}`);
-
   try {
+    // Only fetch products that have export types
     const { data: products, error: fetchError } = await supabase
-      .from("exportcustomer_product")
-      .select("*");
+      .from("products")
+      .select("id, variants, product_types")
+      .or("product_types.cs.{export_sea},product_types.cs.{export_air}");
 
     if (fetchError) throw fetchError;
     if (!products || products.length === 0) {
-      console.log("[Customer Price Recalc] No customer products found");
-      return { updated: 0, errors: 0 };
+      console.log("[Variant USD Update] No export products found");
+      return { totalUpdated: 0, totalErrors: 0 };
     }
 
-    let updated = 0;
-    let errors = 0;
+    let totalUpdated = 0;
+    let totalErrors = 0;
 
     for (const product of products) {
+      if (
+        !product.variants ||
+        !Array.isArray(product.variants) ||
+        product.variants.length === 0
+      )
+        continue;
+
       try {
-        const exfactoryprice = parseFloat(product.exfactoryprice) || 0;
-        const export_doc = parseFloat(product.export_doc) || 0;
-        const transport_cost = parseFloat(product.transport_cost) || 0;
-        const loading_cost = parseFloat(product.loading_cost) || 0;
-        const airway_cost = parseFloat(product.airway_cost) || 0;
-        const forwardHandling_cost =
-          parseFloat(product.forwardHandling_cost) || 0;
+        const updatedVariants = product.variants.map((variant) => {
+          const purchasePrice = parseFloat(variant.purchasing_price) || 0;
+          const jcFobUSD = parseFloat(variant.jc_fob) || 0;
+          const packingCostUSD = parseFloat(variant.packing_cost) || 0;
+          const labourUSD = parseFloat(variant.labour_overhead) || 0;
+          const profitUSD =
+            parseFloat(variant.profit_usd ?? variant.profit) || 0;
 
-        // Total handling (USD) → LKR with new rate → add to ex-factory (LKR) = FOB (LKR)
-        const totalHandlingUSD =
-          export_doc +
-          transport_cost +
-          loading_cost +
-          airway_cost +
-          forwardHandling_cost;
-        const newFobPrice = parseFloat(
-          (exfactoryprice + totalHandlingUSD * newUsdRate).toFixed(2),
-        );
+          let newExFactory = variant.exfactoryprice; // default: keep existing
 
-        // FOB in USD with new rate
-        const fobInUSD = newFobPrice / newUsdRate;
+          if (jcFobUSD > 0) {
+            // JC FOB model: exfactory = (jc_fob + profit_usd + packing + labour) * rate
+            newExFactory = parseFloat(
+              (
+                (jcFobUSD + profitUSD + packingCostUSD + labourUSD) *
+                newUsdRate
+              ).toFixed(2),
+            );
+          } else if (purchasePrice > 0) {
+            // Purchase price model: exfactory = purchasing_price + (labour + packing + profit_usd) * rate
+            newExFactory = parseFloat(
+              (
+                purchasePrice +
+                (labourUSD + packingCostUSD + profitUSD) * newUsdRate
+              ).toFixed(2),
+            );
+          }
 
-        const updates = { fob_price: newFobPrice };
+          // Also recalc profit_lkr from profit_usd if stored
+          const newProfitLkr =
+            profitUSD > 0
+              ? parseFloat((profitUSD * newUsdRate).toFixed(2))
+              : parseFloat(variant.profit_lkr) || 0;
 
-        if (product.freight_type === "air") {
-          updates.cnf_45kg = parseFloat(
-            (fobInUSD + (parseFloat(product.freight_cost_45kg) || 0)).toFixed(
-              2,
-            ),
-          );
-          updates.cnf_100kg = parseFloat(
-            (fobInUSD + (parseFloat(product.freight_cost_100kg) || 0)).toFixed(
-              2,
-            ),
-          );
-          updates.cnf_300kg = parseFloat(
-            (fobInUSD + (parseFloat(product.freight_cost_300kg) || 0)).toFixed(
-              2,
-            ),
-          );
-          updates.cnf_500kg = parseFloat(
-            (fobInUSD + (parseFloat(product.freight_cost_500kg) || 0)).toFixed(
-              2,
-            ),
-          );
-        } else if (product.freight_type === "sea") {
-          updates.cnf_20ft = parseFloat(
-            (fobInUSD + (parseFloat(product.freight_cost_20ft) || 0)).toFixed(
-              2,
-            ),
-          );
-          updates.cnf_40ft = parseFloat(
-            (fobInUSD + (parseFloat(product.freight_cost_40ft) || 0)).toFixed(
-              2,
-            ),
-          );
-        } else {
-          // generic cnf fallback
-          updates.cnf = parseFloat(
-            (fobInUSD + (parseFloat(product.freight_cost) || 0)).toFixed(2),
-          );
-        }
+          return {
+            ...variant,
+            usdrate: newUsdRate,
+            exfactoryprice: newExFactory,
+            profit_lkr: newProfitLkr,
+          };
+        });
 
         const { error: updateError } = await supabase
-          .from("exportcustomer_product")
-          .update(updates)
+          .from("products")
+          .update({ variants: updatedVariants })
           .eq("id", product.id);
 
         if (updateError) {
           console.error(
-            `[Customer Price Recalc] Error on product ${product.id}:`,
+            `[Variant USD Update] Error on product ${product.id}:`,
             updateError,
           );
-          errors++;
+          totalErrors++;
         } else {
-          updated++;
+          totalUpdated++;
         }
       } catch (err) {
         console.error(
-          `[Customer Price Recalc] Exception on product ${product.id}:`,
+          `[Variant USD Update] Exception on product ${product.id}:`,
           err,
         );
-        errors++;
+        totalErrors++;
       }
     }
 
     console.log(
-      `[Customer Price Recalc] Done — ${updated} updated, ${errors} errors`,
+      `[Variant USD Update] Done — ${totalUpdated} products updated, ${totalErrors} errors`,
     );
-    return { updated, errors };
+    return { totalUpdated, totalErrors };
   } catch (err) {
-    console.error("[Customer Price Recalc] Fatal error:", err);
+    console.error("[Variant USD Update] Fatal error:", err);
     throw err;
   }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Combined trigger — runs both helpers in parallel
+// HELPER 2: Recalculate FOB (USD) + CNF in exportcustomer_product (sea)
+//           fob_price is stored as USD:
+//           fob_usd = exfactoryprice_lkr / newUsdRate + totalHandlingUSD
+// ─────────────────────────────────────────────────────────────────────────────
+const recalculateCustomerPrices = async (newUsdRate) => {
+  console.log(`[Customer Price Recalc] Starting with USD rate: ${newUsdRate}`);
+
+  const results = {
+    sea: { updated: 0, errors: 0 },
+    air: { updated: 0, errors: 0 },
+  };
+
+  // ── SEA customer products ──
+  try {
+    const { data: seaProducts, error } = await supabase
+      .from("exportcustomer_product")
+      .select("*");
+
+    if (error) throw error;
+
+    for (const cp of seaProducts || []) {
+      try {
+        const exf = parseFloat(cp.exfactoryprice) || 0;
+        const export_doc = parseFloat(cp.export_doc) || 0;
+        const transport_cost = parseFloat(cp.transport_cost) || 0;
+        const loading_cost = parseFloat(cp.loading_cost) || 0;
+        const airway_cost = parseFloat(cp.airway_cost) || 0;
+        const fwdHandling = parseFloat(cp.forwardHandling_cost) || 0;
+
+        const totalHandlingUSD =
+          export_doc +
+          transport_cost +
+          loading_cost +
+          airway_cost +
+          fwdHandling;
+
+        // fob_price stored as USD
+        const fobUSD = exf / newUsdRate + totalHandlingUSD;
+
+        const updates = { fob_price: parseFloat(fobUSD.toFixed(4)) };
+
+        if (cp.freight_type === "sea") {
+          const fc20 = parseFloat(cp.freight_cost_20ft) || 0;
+          const fc40 = parseFloat(cp.freight_cost_40ft) || 0;
+          updates.cnf_20ft = parseFloat((fobUSD + fc20).toFixed(2));
+          updates.cnf_40ft = parseFloat((fobUSD + fc40).toFixed(2));
+        } else if (cp.freight_type === "air") {
+          const fc45 = parseFloat(cp.freight_cost_45kg) || 0;
+          const fc100 = parseFloat(cp.freight_cost_100kg) || 0;
+          const fc300 = parseFloat(cp.freight_cost_300kg) || 0;
+          const fc500 = parseFloat(cp.freight_cost_500kg) || 0;
+          updates.cnf_45kg = parseFloat((fobUSD + fc45).toFixed(2));
+          updates.cnf_100kg = parseFloat((fobUSD + fc100).toFixed(2));
+          updates.cnf_300kg = parseFloat((fobUSD + fc300).toFixed(2));
+          updates.cnf_500kg = parseFloat((fobUSD + fc500).toFixed(2));
+        }
+
+        const { error: upErr } = await supabase
+          .from("exportcustomer_product")
+          .update(updates)
+          .eq("id", cp.id);
+
+        if (upErr) {
+          console.error(`[Sea Recalc] Error on ${cp.id}:`, upErr);
+          results.sea.errors++;
+        } else results.sea.updated++;
+      } catch (e) {
+        console.error(`[Sea Recalc] Exception on ${cp.id}:`, e);
+        results.sea.errors++;
+      }
+    }
+  } catch (err) {
+    console.error("[Sea Recalc] Fatal:", err);
+  }
+
+  // ── AIR customer products ──
+  try {
+    const { data: airProducts, error } = await supabase
+      .from("exportcustomer_productair")
+      .select("*");
+
+    if (error) throw error;
+
+    for (const cp of airProducts || []) {
+      try {
+        const exf = parseFloat(cp.exfactoryprice) || 0;
+        const export_doc = parseFloat(cp.export_doc) || 0;
+        const transport_cost = parseFloat(cp.transport_cost) || 0;
+        const loading_cost = parseFloat(cp.loading_cost) || 0;
+        const airway_cost = parseFloat(cp.airway_cost) || 0;
+        const fwdHandling = parseFloat(cp.forwardHandling_cost) || 0;
+
+        const totalHandlingUSD =
+          export_doc +
+          transport_cost +
+          loading_cost +
+          airway_cost +
+          fwdHandling;
+
+        // fob_price stored as USD
+        const fobUSD = exf / newUsdRate + totalHandlingUSD;
+
+        const updates = { fob_price: parseFloat(fobUSD.toFixed(4)) };
+
+        if (cp.freight_type === "air") {
+          const fc45 = parseFloat(cp.freight_cost_45kg) || 0;
+          const fc100 = parseFloat(cp.freight_cost_100kg) || 0;
+          const fc300 = parseFloat(cp.freight_cost_300kg) || 0;
+          const fc500 = parseFloat(cp.freight_cost_500kg) || 0;
+          updates.cnf_45kg = parseFloat((fobUSD + fc45).toFixed(2));
+          updates.cnf_100kg = parseFloat((fobUSD + fc100).toFixed(2));
+          updates.cnf_300kg = parseFloat((fobUSD + fc300).toFixed(2));
+          updates.cnf_500kg = parseFloat((fobUSD + fc500).toFixed(2));
+        } else if (cp.freight_type === "sea") {
+          const fc20 = parseFloat(cp.freight_cost_20ft) || 0;
+          const fc40 = parseFloat(cp.freight_cost_40ft) || 0;
+          updates.cnf_20ft = parseFloat((fobUSD + fc20).toFixed(2));
+          updates.cnf_40ft = parseFloat((fobUSD + fc40).toFixed(2));
+        }
+
+        const { error: upErr } = await supabase
+          .from("exportcustomer_productair")
+          .update(updates)
+          .eq("id", cp.id);
+
+        if (upErr) {
+          console.error(`[Air Recalc] Error on ${cp.id}:`, upErr);
+          results.air.errors++;
+        } else results.air.updated++;
+      } catch (e) {
+        console.error(`[Air Recalc] Exception on ${cp.id}:`, e);
+        results.air.errors++;
+      }
+    }
+  } catch (err) {
+    console.error("[Air Recalc] Fatal:", err);
+  }
+
+  console.log(
+    `[Customer Price Recalc] Done — sea: ${results.sea.updated} updated, air: ${results.air.updated} updated`,
+  );
+  return results;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Combined trigger
 // ─────────────────────────────────────────────────────────────────────────────
 const onRateChanged = async (newUsdRate) => {
   const [variantResult, customerResult] = await Promise.allSettled([
@@ -241,7 +279,7 @@ const onRateChanged = async (newUsdRate) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GET /api/usd-rate  — current rate (used by all product forms on load)
+// GET /api/usd-rate
 // ─────────────────────────────────────────────────────────────────────────────
 router.get("/", async (req, res) => {
   try {
@@ -253,9 +291,8 @@ router.get("/", async (req, res) => {
       .single();
 
     if (error) {
-      if (error.code === "PGRST116") {
+      if (error.code === "PGRST116")
         return res.status(404).json({ message: "No USD rate found" });
-      }
       throw error;
     }
 
@@ -276,7 +313,6 @@ router.get("/", async (req, res) => {
 router.get("/history", async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 30;
-
     const { data: history, error } = await supabase
       .from("usd_rates")
       .select("*")
@@ -297,7 +333,6 @@ router.get("/history", async (req, res) => {
 router.get("/date/:date", async (req, res) => {
   try {
     const { date } = req.params;
-
     const { data: rate, error } = await supabase
       .from("usd_rates")
       .select("*")
@@ -307,9 +342,8 @@ router.get("/date/:date", async (req, res) => {
       .single();
 
     if (error) {
-      if (error.code === "PGRST116") {
+      if (error.code === "PGRST116")
         return res.status(404).json({ message: "No rate found for this date" });
-      }
       throw error;
     }
     res.json(rate);
@@ -320,17 +354,15 @@ router.get("/date/:date", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POST /api/usd-rate  — add new rate + trigger full recalculation
+// POST /api/usd-rate — add new rate + trigger full recalculation
 // ─────────────────────────────────────────────────────────────────────────────
 router.post("/", async (req, res) => {
   try {
     const { rate, date } = req.body;
-
-    if (!rate || parseFloat(rate) <= 0) {
+    if (!rate || parseFloat(rate) <= 0)
       return res
         .status(400)
         .json({ message: "A valid rate greater than 0 is required" });
-    }
 
     const newRate = parseFloat(rate);
 
@@ -362,35 +394,28 @@ router.post("/", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PUT /api/usd-rate/:id  — edit rate entry + recalculate if it's the latest
+// PUT /api/usd-rate/:id — edit rate + recalculate if it's the latest
 // ─────────────────────────────────────────────────────────────────────────────
 router.put("/:id", async (req, res) => {
   try {
     const { id } = req.params;
     const { rate, date } = req.body;
-
-    if (!rate || parseFloat(rate) <= 0) {
+    if (!rate || parseFloat(rate) <= 0)
       return res
         .status(400)
         .json({ message: "A valid rate greater than 0 is required" });
-    }
 
     const newRate = parseFloat(rate);
 
     const { data: updatedRate, error: updateError } = await supabase
       .from("usd_rates")
-      .update({
-        rate: newRate,
-        date: date,
-        updated_at: new Date().toISOString(),
-      })
+      .update({ rate: newRate, date, updated_at: new Date().toISOString() })
       .eq("id", id)
       .select()
       .single();
 
     if (updateError) throw updateError;
 
-    // Only recalculate if this is the most recent rate
     const { data: latestRate } = await supabase
       .from("usd_rates")
       .select("id")
@@ -437,7 +462,7 @@ router.delete("/:id", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POST /api/usd-rate/recalculate  — manual trigger
+// POST /api/usd-rate/recalculate — manual trigger
 // ─────────────────────────────────────────────────────────────────────────────
 router.post("/recalculate", async (req, res) => {
   try {
@@ -448,11 +473,10 @@ router.post("/recalculate", async (req, res) => {
       .limit(1)
       .single();
 
-    if (error || !latestRate) {
+    if (error || !latestRate)
       return res
         .status(404)
         .json({ message: "No USD rate found to recalculate with" });
-    }
 
     const result = await onRateChanged(parseFloat(latestRate.rate));
 

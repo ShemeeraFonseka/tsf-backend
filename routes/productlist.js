@@ -183,19 +183,21 @@ router.put("/upload/:id", upload.single("image"), async (req, res) => {
           sf(nv.purchasing_price),
         );
 
-        // 2. Cascade to export customer tables
-        await cascadeExportPurchasePrice(
-          "exportcustomer_product",
+        // 2. Cascade to export product variant tables (update purchasing_price in JSONB)
+        await cascadeExportProductPurchasePrice(
+          "exportproducts",
           req.params.id,
           nv.id,
           sf(nv.purchasing_price),
         );
-        await cascadeExportPurchasePrice(
-          "exportcustomer_productair",
+        await cascadeExportProductPurchasePrice(
+          "exportproductsair",
           req.params.id,
           nv.id,
           sf(nv.purchasing_price),
         );
+
+        // Customer table cascade is handled inside cascadeExportProductPurchasePrice
       }
     }
 
@@ -320,18 +322,19 @@ router.put("/:productId/variants/:variantId", async (req, res) => {
     // Cascade if purchasing_price changed
     if (old && Math.abs(sf(old.purchasing_price) - newPP) > 0.001) {
       await cascadeLocalPurchasePrice(productId, variantId, newPP);
-      await cascadeExportPurchasePrice(
-        "exportcustomer_product",
+      await cascadeExportProductPurchasePrice(
+        "exportproducts",
         productId,
         variantId,
         newPP,
       );
-      await cascadeExportPurchasePrice(
-        "exportcustomer_productair",
+      await cascadeExportProductPurchasePrice(
+        "exportproductsair",
         productId,
         variantId,
         newPP,
       );
+      // Customer table cascade is handled inside cascadeExportProductPurchasePrice
     }
 
     res.json(updated.find((v) => String(v.id) === String(variantId)));
@@ -423,17 +426,283 @@ async function cascadeLocalPurchasePrice(productId, variantId, newPP) {
 // When purchasing_price changes: update it in export customer tables
 async function cascadeExportPurchasePrice(table, productId, variantId, newPP) {
   try {
-    let q = supabase.from(table).select("id").eq("product_id", productId);
-    if (variantId) q = q.eq("variant_id", variantId);
-    const { data: rows } = await q;
-    for (const cp of rows || []) {
+    console.log(
+      `[cascade:${table}] product_id=${productId} variant_id=${variantId} newPP=${newPP}`,
+    );
+
+    // Try exact match: product_id + variant_id
+    let rows = [];
+    if (variantId) {
+      const { data } = await supabase
+        .from(table)
+        .select("id, product_id, variant_id")
+        .eq("product_id", productId)
+        .eq("variant_id", variantId);
+      rows = data || [];
+    }
+
+    // Fallback 1: product_id only
+    if (!rows.length) {
+      const { data } = await supabase
+        .from(table)
+        .select("id, product_id, variant_id")
+        .eq("product_id", productId);
+      rows = data || [];
+      if (rows.length)
+        console.log(
+          `[cascade:${table}] fallback by product_id found ${rows.length} rows`,
+        );
+    }
+
+    // Fallback 2: for air table, match via exportproductsair.product_id → products.id
+    if (!rows.length && table === "exportcustomer_productair") {
+      const { data: master } = await supabase
+        .from("products")
+        .select("common_name")
+        .eq("id", productId)
+        .single();
+      if (master?.common_name) {
+        const { data: airProd } = await supabase
+          .from("exportproductsair")
+          .select("id")
+          .ilike("common_name", master.common_name)
+          .limit(1);
+        if (airProd?.[0]) {
+          console.log(
+            `[cascade:air] found exportproductsair.id=${airProd[0].id} via common_name`,
+          );
+          const { data } = await supabase
+            .from(table)
+            .select("id, product_id, variant_id")
+            .eq("product_id", airProd[0].id);
+          rows = data || [];
+          if (rows.length)
+            console.log(
+              `[cascade:air] common_name fallback found ${rows.length} rows`,
+            );
+        }
+      }
+    }
+
+    for (const cp of rows) {
       await supabase
         .from(table)
         .update({ purchasing_price: newPP })
         .eq("id", cp.id);
     }
+    console.log(`[cascade:${table}] ✅ updated ${rows.length} rows`);
   } catch (err) {
     console.error(`[cascadeExportPurchasePrice:${table}]`, err.message);
+  }
+}
+
+// Update purchasing_price inside exportproducts/exportproductsair variants JSONB
+// Then recalculate exfactoryprice, fob_price and CNF for customer rows
+async function cascadeExportProductPurchasePrice(
+  table,
+  productId,
+  variantId,
+  newPP,
+) {
+  try {
+    const isAir = table === "exportproductsair";
+    const customerTable = isAir
+      ? "exportcustomer_productair"
+      : "exportcustomer_product";
+
+    // Find export product by product_id FK
+    let { data: rows } = await supabase
+      .from(table)
+      .select("id, variants, common_name")
+      .eq("product_id", productId);
+
+    // Fallback: match by common_name
+    if (!rows?.length) {
+      const { data: master } = await supabase
+        .from("products")
+        .select("common_name")
+        .eq("id", productId)
+        .single();
+      if (master?.common_name) {
+        const { data } = await supabase
+          .from(table)
+          .select("id, variants, common_name")
+          .ilike("common_name", master.common_name);
+        rows = data || [];
+      }
+    }
+
+    // Get current USD rate
+    const { data: usdRow } = await supabase
+      .from("usd_rates")
+      .select("rate")
+      .order("date", { ascending: false })
+      .limit(1)
+      .single();
+    const usdRate = sf(usdRow?.rate, 304);
+
+    for (const row of rows || []) {
+      if (!Array.isArray(row.variants)) continue;
+      let changedVariant = null;
+
+      const updatedVariants = row.variants.map((v) => {
+        const idMatch =
+          String(v.id) === String(variantId) ||
+          Math.floor(parseFloat(v.id)) === Math.floor(parseFloat(variantId));
+        if (!idMatch) return v;
+
+        // Recalculate exfactoryprice with new purchasing_price
+        const labour = sf(v.labour_overhead);
+        const packing = sf(v.packing_cost);
+        const profitUSD = sf(v.profit_usd ?? v.profit);
+        const rate = sf(v.usdrate, usdRate);
+
+        let newExFactory = sf(v.exfactoryprice); // keep existing if no pricing model
+        if (sf(v.purchasing_price) > 0 && !sf(v.jc_fob)) {
+          // Purchase price model: exfactory = pp + (labour + packing + profit) * rate
+          newExFactory = newPP + (labour + packing + profitUSD) * rate;
+        } else if (sf(v.jc_fob) > 0) {
+          // JC FOB model: exfactory = (jc_fob + profit + packing + labour) * rate
+          newExFactory = (sf(v.jc_fob) + profitUSD + packing + labour) * rate;
+        }
+
+        changedVariant = {
+          ...v,
+          purchasing_price: newPP,
+          exfactoryprice: parseFloat(newExFactory.toFixed(2)),
+        };
+        return changedVariant;
+      });
+
+      if (changedVariant) {
+        await supabase
+          .from(table)
+          .update({ variants: updatedVariants })
+          .eq("id", row.id);
+        console.log(
+          `[cascade:${table}] ✅ updated variant in row ${row.id} — newExFactory=${changedVariant.exfactoryprice}`,
+        );
+
+        // Now cascade exfactoryprice change to customer rows
+        // Find customer rows for this export product
+        let custRows = [];
+        const { data: c1 } = await supabase
+          .from(customerTable)
+          .select("*")
+          .eq("product_id", row.id)
+          .eq("variant_id", changedVariant.id);
+        custRows = c1 || [];
+
+        if (!custRows.length) {
+          // Try product_id = master products.id
+          const { data: c2 } = await supabase
+            .from(customerTable)
+            .select("*")
+            .eq("product_id", productId);
+          custRows = c2 || [];
+        }
+
+        if (!custRows.length) {
+          console.log(`[cascade:${customerTable}] no customer rows found`);
+          continue;
+        }
+
+        for (const cp of custRows) {
+          const additionalUSD =
+            sf(cp.export_doc) +
+            sf(cp.transport_cost) +
+            sf(cp.loading_cost) +
+            sf(cp.airway_cost) +
+            sf(cp.forwardHandling_cost);
+
+          const fobInUSD =
+            changedVariant.exfactoryprice / usdRate + additionalUSD;
+
+          const updateData = {
+            purchasing_price: newPP,
+            exfactoryprice: changedVariant.exfactoryprice,
+            fob_price: parseFloat(fobInUSD.toFixed(4)),
+          };
+
+          if (isAir) {
+            // Fetch customer freight rates
+            const { data: customer } = await supabase
+              .from("exportcustomersair")
+              .select("country, airport_code")
+              .eq("cus_id", cp.cus_id)
+              .single();
+            if (customer) {
+              let q = supabase
+                .from("freight_rates")
+                .select("*")
+                .eq("country", customer.country)
+                .order("date", { ascending: false })
+                .limit(1);
+              if (customer.airport_code)
+                q = supabase
+                  .from("freight_rates")
+                  .select("*")
+                  .eq("country", customer.country)
+                  .eq("airport_code", customer.airport_code)
+                  .order("date", { ascending: false })
+                  .limit(1);
+              const { data: rates } = await q;
+              const rate = rates?.[0];
+              const m = sf(cp.multiplier, 1);
+              const d = sf(cp.divisor, 1) || 1;
+              if (rate) {
+                const fc45 = (m * sf(rate.rate_45kg)) / d;
+                const fc100 = (m * sf(rate.rate_100kg)) / d;
+                const fc300 = (m * sf(rate.rate_300kg)) / d;
+                const fc500 = (m * sf(rate.rate_500kg)) / d;
+                Object.assign(updateData, {
+                  freight_cost_45kg: fc45,
+                  freight_cost_100kg: fc100,
+                  freight_cost_300kg: fc300,
+                  freight_cost_500kg: fc500,
+                  cnf_45kg: parseFloat((fobInUSD + fc45).toFixed(4)),
+                  cnf_100kg: parseFloat((fobInUSD + fc100).toFixed(4)),
+                  cnf_300kg: parseFloat((fobInUSD + fc300).toFixed(4)),
+                  cnf_500kg: parseFloat((fobInUSD + fc500).toFixed(4)),
+                });
+              } else {
+                // Keep existing freight, just update CNF
+                Object.assign(updateData, {
+                  cnf_45kg: parseFloat(
+                    (fobInUSD + sf(cp.freight_cost_45kg)).toFixed(4),
+                  ),
+                  cnf_100kg: parseFloat(
+                    (fobInUSD + sf(cp.freight_cost_100kg)).toFixed(4),
+                  ),
+                  cnf_300kg: parseFloat(
+                    (fobInUSD + sf(cp.freight_cost_300kg)).toFixed(4),
+                  ),
+                  cnf_500kg: parseFloat(
+                    (fobInUSD + sf(cp.freight_cost_500kg)).toFixed(4),
+                  ),
+                });
+              }
+            }
+          } else {
+            // Sea freight — use existing freight costs
+            const cnf20 = parseFloat(
+              (fobInUSD + sf(cp.freight_cost_20ft)).toFixed(4),
+            );
+            const cnf40 = parseFloat(
+              (fobInUSD + sf(cp.freight_cost_40ft)).toFixed(4),
+            );
+            Object.assign(updateData, { cnf_20ft: cnf20, cnf_40ft: cnf40 });
+          }
+
+          await supabase.from(customerTable).update(updateData).eq("id", cp.id);
+          console.log(
+            `[cascade:${customerTable}] ✅ updated row ${cp.id} FOB=${fobInUSD.toFixed(4)}`,
+          );
+        }
+      }
+    }
+  } catch (err) {
+    console.error(`[cascadeExportProductPurchasePrice:${table}]`, err.message);
   }
 }
 

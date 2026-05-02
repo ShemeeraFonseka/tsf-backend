@@ -84,6 +84,9 @@ import localProductPricesRouter from "./routes/local-product-prices.js";
 app.use("/api/productlist", productlistRouter);
 app.use("/api/local-product-prices", localProductPricesRouter);
 
+import exportproductlistairRouter from "./routes/exportproductlistair.js";
+app.use("/api/exportproductlistair", exportproductlistairRouter);
+
 // For local development
 if (process.env.NODE_ENV !== "production") {
   const port = process.env.PORT || 5000;

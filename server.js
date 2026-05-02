@@ -78,8 +78,11 @@ app.use("/api/orders", ordersRouter);
 import invoicesRouter from "./routes/invoices.js";
 app.use("/api/invoices", invoicesRouter);
 
-import productlistRouter from "./routes/productlist_unified.js";
+import productlistRouter from "./routes/productlist.js";
+import localProductPricesRouter from "./routes/local-product-prices.js";
+
 app.use("/api/productlist", productlistRouter);
+app.use("/api/local-product-prices", localProductPricesRouter);
 
 // For local development
 if (process.env.NODE_ENV !== "production") {

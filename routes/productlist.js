@@ -1,127 +1,114 @@
+// routes/productlist.js — MASTER CATALOGUE
+// Products are type-agnostic. variants only carry: { id, size, unit, purchasing_price }
+// Local/sea/air pricing live in separate tables.
 import express from "express";
 import supabase from "../db.js";
 import multer from "multer";
 import path from "path";
 
 const router = express.Router();
-
-// Configure multer for memory storage (we'll upload to Supabase Storage)
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
+const sf = (v, d = 0) => (isFinite(parseFloat(v)) ? parseFloat(v) : d);
 
-// GET all products with their variants
+// ── image upload helper ────────────────────────────────────────
+async function uploadImage(file) {
+  const fileName = `${Date.now()}${path.extname(file.originalname)}`;
+  const { error } = await supabase.storage
+    .from("product-images")
+    .upload(fileName, file.buffer, { contentType: file.mimetype });
+  if (error) throw error;
+  const {
+    data: { publicUrl },
+  } = supabase.storage.from("product-images").getPublicUrl(fileName);
+  return publicUrl;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// GET /api/productlist  — all products (master catalogue)
+// ═══════════════════════════════════════════════════════════════
 router.get("/", async (req, res) => {
   try {
-    const { data: products, error } = await supabase
+    const { data, error } = await supabase
       .from("products")
       .select("*")
       .order("common_name");
-
     if (error) throw error;
 
-    // Sort products by their lowest variant price
-    const sortedProducts = products
-      .map((product) => {
-        if (product.variants && product.variants.length > 0) {
-          product.variants.sort((a, b) => {
-            return (
-              parseFloat(a.purchasing_price) - parseFloat(b.purchasing_price)
-            );
-          });
-        }
-        return product;
-      })
-      .sort((a, b) => {
-        const priceA =
-          a.variants && a.variants.length > 0
-            ? Math.min(...a.variants.map((v) => parseFloat(v.purchasing_price)))
-            : Infinity;
-        const priceB =
-          b.variants && b.variants.length > 0
-            ? Math.min(...b.variants.map((v) => parseFloat(v.purchasing_price)))
-            : Infinity;
-        return priceA - priceB;
-      });
-
-    res.json(sortedProducts);
+    const result = (data || []).map((p) => ({
+      ...p,
+      variants: Array.isArray(p.variants)
+        ? [...p.variants].sort(
+            (a, b) =>
+              sf(a.purchasing_price, 9999) - sf(b.purchasing_price, 9999),
+          )
+        : [],
+    }));
+    res.json(result);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Database error", details: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// GET single product by ID
+// GET /api/productlist/:id
 router.get("/:id", async (req, res) => {
   try {
-    const { data: product, error } = await supabase
+    const { data, error } = await supabase
       .from("products")
       .select("*")
       .eq("id", req.params.id)
       .single();
-
-    if (error) {
-      if (error.code === "PGRST116") {
-        return res.status(404).json({ error: "Product not found" });
-      }
-      throw error;
-    }
-
-    res.json(product);
+    if (error)
+      return res
+        .status(error.code === "PGRST116" ? 404 : 500)
+        .json({ error: error.message });
+    if (!Array.isArray(data.variants)) data.variants = [];
+    res.json(data);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Database error", details: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// POST - Add new product with variants
+// ═══════════════════════════════════════════════════════════════
+// POST /api/productlist/upload  — create product
+// ═══════════════════════════════════════════════════════════════
 router.post("/upload", upload.single("image"), async (req, res) => {
-  const {
-    common_name,
-    scientific_name,
-    category,
-    description,
-    species_type,
-    variants,
-  } = req.body;
-  let image_url = null;
-
   try {
-    if (req.file) {
-      const fileName = `${Date.now()}${path.extname(req.file.originalname)}`;
-      const { error: uploadError } = await supabase.storage
-        .from("product-images")
-        .upload(fileName, req.file.buffer, {
-          contentType: req.file.mimetype,
-        });
+    const {
+      common_name,
+      scientific_name,
+      description,
+      species_type,
+      variants,
+    } = req.body;
+    const image_url = req.file ? await uploadImage(req.file) : null;
+    const rawVariants = JSON.parse(
+      typeof variants === "string" ? variants : JSON.stringify(variants || []),
+    );
 
-      if (uploadError) throw uploadError;
-
-      const {
-        data: { publicUrl },
-      } = supabase.storage.from("product-images").getPublicUrl(fileName);
-
-      image_url = publicUrl;
-    }
-
-    const variantsData =
-      typeof variants === "string" ? JSON.parse(variants) : variants || [];
+    // Strip variants to base fields only
+    const cleanVariants = rawVariants
+      .map((v) => ({
+        id: v.id || Date.now(),
+        size: v.size || "",
+        unit: v.unit || "kg",
+        purchasing_price: sf(v.purchasing_price),
+      }))
+      .filter((v) => (v.size || "").trim());
 
     const { data, error } = await supabase
       .from("products")
       .insert({
         common_name,
         scientific_name,
-        category,
         description,
         species_type,
         image_url,
-        variants: variantsData,
+        variants: cleanVariants,
       })
       .select()
       .single();
-
     if (error) throw error;
-
     res.status(201).json(data);
   } catch (err) {
     console.error(err);
@@ -129,453 +116,324 @@ router.post("/upload", upload.single("image"), async (req, res) => {
   }
 });
 
-// PUT - Update product with variants
+// ═══════════════════════════════════════════════════════════════
+// PUT /api/productlist/upload/:id  — update product
+// ═══════════════════════════════════════════════════════════════
 router.put("/upload/:id", upload.single("image"), async (req, res) => {
-  const {
-    common_name,
-    scientific_name,
-    description,
-    category,
-    species_type,
-    existing_image_url,
-    variants,
-  } = req.body;
-  let image_url = existing_image_url;
-
   try {
-    const { data: currentProduct, error: fetchError } = await supabase
+    const {
+      common_name,
+      scientific_name,
+      description,
+      species_type,
+      existing_image_url,
+      variants,
+    } = req.body;
+    const image_url = req.file
+      ? await uploadImage(req.file)
+      : existing_image_url;
+    const rawVariants = JSON.parse(
+      typeof variants === "string" ? variants : JSON.stringify(variants || []),
+    );
+
+    // Strip to base fields only
+    const cleanVariants = rawVariants
+      .map((v) => ({
+        id: v.id || Date.now(),
+        size: v.size || "",
+        unit: v.unit || "kg",
+        purchasing_price: sf(v.purchasing_price),
+      }))
+      .filter((v) => (v.size || "").trim());
+
+    // Fetch old data for cascade checks
+    const { data: old } = await supabase
       .from("products")
-      .select("variants")
+      .select("variants, image_url")
       .eq("id", req.params.id)
       .single();
 
-    if (fetchError) {
-      if (fetchError.code === "PGRST116") {
-        return res.status(404).json({ error: "Product not found" });
-      }
-      throw fetchError;
-    }
-
-    if (req.file) {
-      const fileName = `${Date.now()}${path.extname(req.file.originalname)}`;
-      const { error: uploadError } = await supabase.storage
-        .from("product-images")
-        .upload(fileName, req.file.buffer, {
-          contentType: req.file.mimetype,
-        });
-
-      if (uploadError) throw uploadError;
-
-      const {
-        data: { publicUrl },
-      } = supabase.storage.from("product-images").getPublicUrl(fileName);
-
-      image_url = publicUrl;
-    }
-
-    const variantsData =
-      typeof variants === "string" ? JSON.parse(variants) : variants || [];
-
-    const { error: updateError } = await supabase
+    const { error } = await supabase
       .from("products")
       .update({
         common_name,
         scientific_name,
         description,
-        category,
         species_type,
         image_url,
-        variants: variantsData,
+        variants: cleanVariants,
       })
       .eq("id", req.params.id);
+    if (error) throw error;
 
-    if (updateError) throw updateError;
+    // ── Cascade purchasing_price changes ───────────────────────
+    if (old?.variants) {
+      for (const nv of cleanVariants) {
+        const ov = old.variants.find((v) => String(v.id) === String(nv.id));
+        if (!ov) continue;
+        const ppChanged =
+          Math.abs(sf(ov.purchasing_price) - sf(nv.purchasing_price)) > 0.001;
+        if (!ppChanged) continue;
 
-    // Check for price/profit changes and cascade to customer_product
-    if (currentProduct && currentProduct.variants) {
-      const oldVariants = currentProduct.variants;
-      const newVariants = variantsData;
+        // 1. Cascade to local_product_prices (update purchasing_price reference)
+        //    → then recalc customer_product selling_price
+        await cascadeLocalPurchasePrice(
+          req.params.id,
+          nv.id,
+          sf(nv.purchasing_price),
+        );
 
-      for (const newVariant of newVariants) {
-        const oldVariant = oldVariants.find((v) => v.id === newVariant.id);
-        if (!oldVariant) continue;
-
-        const purchaseChanged =
-          oldVariant.purchasing_price !== newVariant.purchasing_price;
-        const profitChanged = oldVariant.profit !== newVariant.profit;
-
-        if (!purchaseChanged && !profitChanged) continue;
-
-        // Fetch all customer prices for this variant
-        const { data: customerPrices, error: fetchPricesError } = await supabase
-          .from("customer_product")
-          .select("*")
-          .eq("product_id", req.params.id)
-          .eq("variant_id", newVariant.id);
-
-        if (fetchPricesError) {
-          console.error("Error fetching customer prices:", fetchPricesError);
-          continue;
-        }
-
-        for (const customerPrice of customerPrices) {
-          let updatePayload;
-
-          if (profitChanged) {
-            // Apply same profit from product variant to customer, recalculate selling_price
-            const newProfit = newVariant.profit ?? 0;
-            const newSellingPrice = customerPrice.purchasing_price + newProfit;
-            const newMarginPercentage =
-              newSellingPrice > 0 ? (newProfit / newSellingPrice) * 100 : 0;
-
-            updatePayload = {
-              margin: newProfit,
-              selling_price: newSellingPrice,
-              margin_percentage: newMarginPercentage,
-            };
-          } else {
-            // purchasing_price changed — keep margin fixed, recalculate selling_price
-            const margin = customerPrice.margin ?? 0;
-            const newSellingPrice = newVariant.purchasing_price + margin;
-            const newMarginPercentage =
-              newSellingPrice > 0 ? (margin / newSellingPrice) * 100 : 0;
-
-            updatePayload = {
-              purchasing_price: newVariant.purchasing_price,
-              selling_price: newSellingPrice,
-              margin: margin,
-              margin_percentage: newMarginPercentage,
-            };
-          }
-
-          const { error: updatePriceError } = await supabase
-            .from("customer_product")
-            .update(updatePayload)
-            .eq("id", customerPrice.id);
-
-          if (updatePriceError) {
-            console.error("Error updating customer price:", updatePriceError);
-          }
-        }
+        // 2. Cascade to export customer tables
+        await cascadeExportPurchasePrice(
+          "exportcustomer_product",
+          req.params.id,
+          nv.id,
+          sf(nv.purchasing_price),
+        );
+        await cascadeExportPurchasePrice(
+          "exportcustomer_productair",
+          req.params.id,
+          nv.id,
+          sf(nv.purchasing_price),
+        );
       }
     }
 
-    const { data: updatedProduct, error: fetchUpdatedError } = await supabase
+    // ── Cascade image change ───────────────────────────────────
+    if (old?.image_url && old.image_url !== image_url) {
+      await supabase
+        .from("exportcustomer_product")
+        .update({ image_url })
+        .eq("product_id", req.params.id);
+      await supabase
+        .from("exportcustomer_productair")
+        .update({ image_url })
+        .eq("product_id", req.params.id);
+    }
+
+    const { data: updated } = await supabase
       .from("products")
       .select("*")
       .eq("id", req.params.id)
       .single();
-
-    if (fetchUpdatedError) throw fetchUpdatedError;
-
-    res.json(updatedProduct);
+    res.json(updated);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// DELETE product
+// ═══════════════════════════════════════════════════════════════
+// DELETE /api/productlist/:id
+// ═══════════════════════════════════════════════════════════════
 router.delete("/:id", async (req, res) => {
   try {
     const { error } = await supabase
       .from("products")
       .delete()
       .eq("id", req.params.id);
-
     if (error) throw error;
-
-    res.json({ message: "Product deleted successfully" });
+    res.json({ message: "Product deleted" });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Database error", details: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// ============== VARIANT OPERATIONS (within same product record) ==============
+// ═══════════════════════════════════════════════════════════════
+// VARIANT ROUTES  (base info only — no pricing)
+// ═══════════════════════════════════════════════════════════════
 
-// GET all variants for a product
 router.get("/:productId/variants", async (req, res) => {
   try {
-    const { data: product, error } = await supabase
+    const { data, error } = await supabase
       .from("products")
       .select("variants")
       .eq("id", req.params.productId)
       .single();
-
     if (error) throw error;
-
-    res.json(product.variants || []);
+    res.json(data.variants || []);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Database error", details: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// POST - Add new variant to a product
 router.post("/:productId/variants", async (req, res) => {
-  const {
-    size,
-    unit,
-    purchasing_price,
-    profit,
-    profit_margin_percentage,
-    selling_price,
-  } = req.body;
   const { productId } = req.params;
-
   try {
-    const { data: product, error: fetchError } = await supabase
+    const { data: prod, error: fe } = await supabase
       .from("products")
       .select("variants")
       .eq("id", productId)
       .single();
+    if (fe) throw fe;
 
-    if (fetchError) throw fetchError;
-
-    let calculatedProfit = profit;
-    let calculatedMarginPercentage = profit_margin_percentage;
-    let calculatedSellingPrice = selling_price;
-
-    if (selling_price && !profit && !profit_margin_percentage) {
-      calculatedProfit =
-        parseFloat(selling_price) - parseFloat(purchasing_price);
-      calculatedMarginPercentage =
-        (calculatedProfit / parseFloat(selling_price)) * 100;
-    } else if (profit && !selling_price) {
-      calculatedSellingPrice =
-        parseFloat(purchasing_price) + parseFloat(profit);
-      calculatedMarginPercentage =
-        (parseFloat(profit) / calculatedSellingPrice) * 100;
-    } else if (profit_margin_percentage && !selling_price) {
-      const marginDecimal = parseFloat(profit_margin_percentage) / 100;
-      calculatedSellingPrice =
-        parseFloat(purchasing_price) / (1 - marginDecimal);
-      calculatedProfit = calculatedSellingPrice - parseFloat(purchasing_price);
-    }
-
-    const currentVariants = product.variants || [];
-    const newVariant = {
+    const variants = Array.isArray(prod.variants) ? prod.variants : [];
+    const newVar = {
       id: Date.now(),
-      size,
-      unit,
-      purchasing_price: parseFloat(purchasing_price),
-      profit: calculatedProfit ? parseFloat(calculatedProfit) : 0,
-      profit_margin_percentage: calculatedMarginPercentage
-        ? parseFloat(calculatedMarginPercentage)
-        : 0,
-      selling_price: calculatedSellingPrice
-        ? parseFloat(calculatedSellingPrice)
-        : parseFloat(purchasing_price),
+      size: req.body.size || "",
+      unit: req.body.unit || "kg",
+      purchasing_price: sf(req.body.purchasing_price),
     };
-    const updatedVariants = [...currentVariants, newVariant];
 
-    const { error: updateError } = await supabase
+    const { error } = await supabase
       .from("products")
-      .update({ variants: updatedVariants })
+      .update({ variants: [...variants, newVar] })
       .eq("id", productId);
-
-    if (updateError) throw updateError;
-
-    res.status(201).json(newVariant);
+    if (error) throw error;
+    res.status(201).json(newVar);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Database error", details: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// PUT - Update a specific variant
 router.put("/:productId/variants/:variantId", async (req, res) => {
-  const {
-    size,
-    unit,
-    purchasing_price,
-    profit,
-    profit_margin_percentage,
-    selling_price,
-  } = req.body;
   const { productId, variantId } = req.params;
-
   try {
-    const { data: product, error: fetchError } = await supabase
+    const { data: prod, error: fe } = await supabase
       .from("products")
       .select("variants")
       .eq("id", productId)
       .single();
+    if (fe) throw fe;
 
-    if (fetchError) throw fetchError;
+    const variants = Array.isArray(prod.variants) ? prod.variants : [];
+    const old = variants.find((v) => String(v.id) === String(variantId));
+    const newPP = sf(req.body.purchasing_price);
 
-    const currentVariants = product.variants || [];
-    const oldVariant = currentVariants.find((v) => v.id == variantId);
-    const oldPrice = oldVariant?.purchasing_price;
-    const oldProfit = oldVariant?.profit;
-
-    let calculatedProfit = profit;
-    let calculatedMarginPercentage = profit_margin_percentage;
-    let calculatedSellingPrice = selling_price;
-
-    if (selling_price && !profit && !profit_margin_percentage) {
-      calculatedProfit =
-        parseFloat(selling_price) - parseFloat(purchasing_price);
-      calculatedMarginPercentage =
-        (calculatedProfit / parseFloat(selling_price)) * 100;
-    } else if (profit && !selling_price) {
-      calculatedSellingPrice =
-        parseFloat(purchasing_price) + parseFloat(profit);
-      calculatedMarginPercentage =
-        (parseFloat(profit) / calculatedSellingPrice) * 100;
-    } else if (profit_margin_percentage && !selling_price) {
-      const marginDecimal = parseFloat(profit_margin_percentage) / 100;
-      calculatedSellingPrice =
-        parseFloat(purchasing_price) / (1 - marginDecimal);
-      calculatedProfit = calculatedSellingPrice - parseFloat(purchasing_price);
-    }
-
-    const finalProfit = calculatedProfit
-      ? parseFloat(calculatedProfit)
-      : profit || oldVariant?.profit || 0;
-
-    const updatedVariants = currentVariants.map((v) =>
-      v.id == variantId
+    const updated = variants.map((v) =>
+      String(v.id) === String(variantId)
         ? {
             ...v,
-            size,
-            unit,
-            purchasing_price: parseFloat(purchasing_price),
-            profit: finalProfit,
-            profit_margin_percentage: calculatedMarginPercentage
-              ? parseFloat(calculatedMarginPercentage)
-              : profit_margin_percentage || v.profit_margin_percentage || 0,
-            selling_price: calculatedSellingPrice
-              ? parseFloat(calculatedSellingPrice)
-              : selling_price ||
-                v.selling_price ||
-                parseFloat(purchasing_price),
+            size: req.body.size || v.size,
+            unit: req.body.unit || v.unit,
+            purchasing_price: newPP,
           }
         : v,
     );
 
-    const { error: updateError } = await supabase
+    const { error } = await supabase
       .from("products")
-      .update({ variants: updatedVariants })
+      .update({ variants: updated })
       .eq("id", productId);
+    if (error) throw error;
 
-    if (updateError) throw updateError;
-
-    const purchaseChanged =
-      oldPrice !== undefined && oldPrice !== parseFloat(purchasing_price);
-    const profitChanged = oldProfit !== undefined && oldProfit !== finalProfit;
-
-    if (purchaseChanged || profitChanged) {
-      await updateCustomerPricesForVariant(
+    // Cascade if purchasing_price changed
+    if (old && Math.abs(sf(old.purchasing_price) - newPP) > 0.001) {
+      await cascadeLocalPurchasePrice(productId, variantId, newPP);
+      await cascadeExportPurchasePrice(
+        "exportcustomer_product",
         productId,
         variantId,
-        parseFloat(purchasing_price),
-        oldPrice,
-        profitChanged ? finalProfit : null,
+        newPP,
+      );
+      await cascadeExportPurchasePrice(
+        "exportcustomer_productair",
+        productId,
+        variantId,
+        newPP,
       );
     }
 
-    const updatedVariant = updatedVariants.find((v) => v.id == variantId);
-    res.json(updatedVariant);
+    res.json(updated.find((v) => String(v.id) === String(variantId)));
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Database error", details: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// DELETE - Remove a specific variant
 router.delete("/:productId/variants/:variantId", async (req, res) => {
   const { productId, variantId } = req.params;
-
   try {
-    const { data: product, error: fetchError } = await supabase
+    const { data: prod, error: fe } = await supabase
       .from("products")
       .select("variants")
       .eq("id", productId)
       .single();
+    if (fe) throw fe;
 
-    if (fetchError) throw fetchError;
-
-    const currentVariants = product.variants || [];
-    const updatedVariants = currentVariants.filter((v) => v.id != variantId);
-
-    const { error: updateError } = await supabase
+    const updated = (prod.variants || []).filter(
+      (v) => String(v.id) !== String(variantId),
+    );
+    const { error } = await supabase
       .from("products")
-      .update({ variants: updatedVariants })
+      .update({ variants: updated })
       .eq("id", productId);
-
-    if (updateError) throw updateError;
-
-    res.json({ message: "Variant deleted successfully" });
+    if (error) throw error;
+    res.json({ message: "Variant deleted" });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Database error", details: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Helper function to update customer prices
-// - newProfit = null  → purchasing_price changed, keep margin fixed
-// - newProfit = value → profit changed, apply same profit to all customers
-async function updateCustomerPricesForVariant(
-  productId,
-  variantId,
-  newPurchasePrice,
-  oldPurchasePrice,
-  newProfit = null,
-) {
-  try {
-    const { data: customerPrices, error: fetchPricesError } = await supabase
-      .from("customer_product")
-      .select("*")
-      .eq("product_id", productId)
-      .eq("variant_id", variantId);
+// ═══════════════════════════════════════════════════════════════
+// CASCADE HELPERS
+// ═══════════════════════════════════════════════════════════════
 
-    if (fetchPricesError) {
-      console.error("Error fetching customer prices:", fetchPricesError);
-      return;
+// When purchasing_price changes on master product:
+// → update purchasing_price in customer_product and recalc selling_price
+async function cascadeLocalPurchasePrice(productId, variantId, newPP) {
+  try {
+    // 1. Update local_product_prices — keep profit fixed, recalc selling_price
+    let lpq = supabase
+      .from("local_product_prices")
+      .select("id, profit, profit_margin_percentage")
+      .eq("product_id", productId);
+    if (variantId)
+      lpq = lpq.eq("variant_id", Math.floor(parseFloat(variantId)));
+    const { data: lpRows } = await lpq;
+
+    for (const lp of lpRows || []) {
+      const profit = sf(lp.profit);
+      const sp = newPP + profit;
+      const pmp = sp > 0 ? (profit / sp) * 100 : 0;
+      await supabase
+        .from("local_product_prices")
+        .update({
+          selling_price: parseFloat(sp.toFixed(2)),
+          profit_margin_percentage: parseFloat(pmp.toFixed(4)),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", lp.id);
     }
 
-    for (const customerPrice of customerPrices) {
-      let updatePayload;
-
-      if (newProfit !== null) {
-        // Profit changed — apply same profit amount, recalculate selling_price
-        const newSellingPrice = customerPrice.purchasing_price + newProfit;
-        const newMarginPercentage =
-          newSellingPrice > 0 ? (newProfit / newSellingPrice) * 100 : 0;
-
-        updatePayload = {
-          margin: newProfit,
-          selling_price: newSellingPrice,
-          margin_percentage: newMarginPercentage,
-        };
-      } else {
-        // purchasing_price changed — keep margin fixed, recalculate selling_price
-        const margin = customerPrice.margin ?? 0;
-        const newSellingPrice = newPurchasePrice + margin;
-        const newMarginPercentage =
-          newSellingPrice > 0 ? (margin / newSellingPrice) * 100 : 0;
-
-        updatePayload = {
-          purchasing_price: newPurchasePrice,
-          selling_price: newSellingPrice,
-          margin: margin,
-          margin_percentage: newMarginPercentage,
-        };
-      }
-
-      const { error: updatePriceError } = await supabase
+    // 2. Update customer_product — keep margin fixed, recalc selling_price
+    let q = supabase
+      .from("customer_product")
+      .select("id, margin")
+      .eq("product_id", productId);
+    if (variantId) q = q.eq("variant_id", variantId);
+    const { data: rows } = await q;
+    for (const cp of rows || []) {
+      const margin = sf(cp.margin);
+      const sp = newPP + margin;
+      const pmp = sp > 0 ? (margin / sp) * 100 : 0;
+      await supabase
         .from("customer_product")
-        .update(updatePayload)
-        .eq("id", customerPrice.id);
-
-      if (updatePriceError) {
-        console.error("Error updating customer price:", updatePriceError);
-      }
+        .update({
+          purchasing_price: newPP,
+          selling_price: parseFloat(sp.toFixed(2)),
+          margin_percentage: parseFloat(pmp.toFixed(4)),
+        })
+        .eq("id", cp.id);
     }
   } catch (err) {
-    console.error("Error in updateCustomerPricesForVariant:", err);
+    console.error("[cascadeLocalPurchasePrice]", err.message);
+  }
+}
+
+// When purchasing_price changes: update it in export customer tables
+async function cascadeExportPurchasePrice(table, productId, variantId, newPP) {
+  try {
+    let q = supabase.from(table).select("id").eq("product_id", productId);
+    if (variantId) q = q.eq("variant_id", variantId);
+    const { data: rows } = await q;
+    for (const cp of rows || []) {
+      await supabase
+        .from(table)
+        .update({ purchasing_price: newPP })
+        .eq("id", cp.id);
+    }
+  } catch (err) {
+    console.error(`[cascadeExportPurchasePrice:${table}]`, err.message);
   }
 }
 

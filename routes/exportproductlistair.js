@@ -153,6 +153,12 @@ router.put("/upload/:id", upload.single("image"), async (req, res) => {
       variantsData = [];
     }
 
+    // Only update product_id if it differs from this record's own id
+    // (prevents setting product_id to exportproductsair.id when editing existing)
+    const parsedProductId = product_id ? parseInt(product_id) : null;
+    const shouldSetProductId =
+      parsedProductId && parsedProductId !== parseInt(req.params.id);
+
     const updatePayload = {
       common_name,
       scientific_name,
@@ -161,7 +167,7 @@ router.put("/upload/:id", upload.single("image"), async (req, res) => {
       species_type,
       image_url: image_url || null,
       variants: variantsData,
-      ...(product_id ? { product_id: parseInt(product_id) } : {}),
+      ...(shouldSetProductId ? { product_id: parsedProductId } : {}),
     };
 
     const { error: updateErr } = await supabase
@@ -176,22 +182,15 @@ router.put("/upload/:id", upload.single("image"), async (req, res) => {
     }
 
     // Cascade pricing changes to customer table
-    if (current?.variants && Array.isArray(current.variants)) {
-      for (const nv of variantsData) {
-        const ov = current.variants.find((v) => v.id === nv.id);
-        if (!ov) continue;
-        const ppChanged =
-          Math.abs(sf(ov.purchasing_price) - sf(nv.purchasing_price)) > 0.001;
-        const exfChanged =
-          Math.abs(sf(ov.exfactoryprice) - sf(nv.exfactoryprice)) > 0.001;
-        if (ppChanged || exfChanged) {
-          await cascadeCustomerPrices(
-            req.params.id,
-            nv.id,
-            sf(nv.exfactoryprice),
-            sf(nv.purchasing_price),
-          );
-        }
+    // Always cascade on PUT — exfactoryprice may change due to profit/packing edits
+    for (const nv of variantsData) {
+      if (sf(nv.exfactoryprice) > 0) {
+        await cascadeCustomerPrices(
+          req.params.id,
+          nv.id,
+          sf(nv.exfactoryprice),
+          sf(nv.purchasing_price),
+        );
       }
     }
 
@@ -371,13 +370,44 @@ async function cascadeCustomerPrices(
   newPurchasePrice,
 ) {
   try {
-    const { data: rows } = await supabase
+    // Try exact match by exportproductsair.id + variant_id
+    let { data: rows } = await supabase
       .from("exportcustomer_productair")
       .select("*")
       .eq("product_id", productId)
       .eq("variant_id", variantId);
 
-    if (!rows?.length) return;
+    // Fallback: match by variant_id only across all customer rows for this product
+    if (!rows?.length) {
+      const { data } = await supabase
+        .from("exportcustomer_productair")
+        .select("*")
+        .eq("product_id", productId);
+      rows = data || [];
+    }
+
+    // Fallback 2: find via master product_id stored on exportproductsair
+    if (!rows?.length) {
+      const { data: ep } = await supabase
+        .from("exportproductsair")
+        .select("product_id")
+        .eq("id", productId)
+        .single();
+      if (ep?.product_id) {
+        const { data } = await supabase
+          .from("exportcustomer_productair")
+          .select("*")
+          .eq("product_id", ep.product_id);
+        rows = data || [];
+      }
+    }
+
+    if (!rows?.length) {
+      console.log(
+        `[cascadeCustomerPrices] no rows found for product=${productId} variant=${variantId}`,
+      );
+      return;
+    }
 
     const { data: usdRow } = await supabase
       .from("usd_rates")

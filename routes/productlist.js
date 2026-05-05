@@ -201,16 +201,46 @@ router.put("/upload/:id", upload.single("image"), async (req, res) => {
       }
     }
 
-    // ── Cascade image change ───────────────────────────────────
-    if (old?.image_url && old.image_url !== image_url) {
+    // ── Cascade image change to all tables ──────────────────────
+    if (image_url && old?.image_url !== image_url) {
+      const pid = req.params.id;
+
+      // Update exportproducts / exportproductsair (by product_id FK or common_name fallback)
+      for (const table of ["exportproducts", "exportproductsair"]) {
+        let { data: epRows } = await supabase
+          .from(table)
+          .select("id")
+          .eq("product_id", pid);
+        if (!epRows?.length) {
+          const { data: master } = await supabase
+            .from("products")
+            .select("common_name")
+            .eq("id", pid)
+            .single();
+          if (master?.common_name) {
+            const { data } = await supabase
+              .from(table)
+              .select("id")
+              .ilike("common_name", master.common_name);
+            epRows = data || [];
+          }
+        }
+        for (const row of epRows || []) {
+          await supabase.from(table).update({ image_url }).eq("id", row.id);
+        }
+      }
+
+      // Update customer product tables
       await supabase
         .from("exportcustomer_product")
         .update({ image_url })
-        .eq("product_id", req.params.id);
+        .eq("product_id", pid);
       await supabase
         .from("exportcustomer_productair")
         .update({ image_url })
-        .eq("product_id", req.params.id);
+        .eq("product_id", pid);
+
+      console.log(`[cascade:image] ✅ updated image_url for product ${pid}`);
     }
 
     const { data: updated } = await supabase
